@@ -1,15 +1,14 @@
-/* Home IoT - UI giống trước + RFID điều khiển cửa (servo) only + tăng nhạy TP223
-   - OLED I2C SDA=23, SCL=22
-   - DHT22 = 17
-   - RAIN = 32
-   - GAS(MQ2) = 27 (ADC)
-   - TOUCH TP223 = 25 (digital) -- software sampling để tăng "nhạy"
-   - RFID: SS=5, RST=21, SCK=18, MISO=19, MOSI=13
-   - BUZZER = 12
-   - SERVO = 14 (5V nguồn riêng; GND chung)
-   - WiFi/NTP/Weather tương tự code ban đầu
-   - Chức năng: màn hình giống bản trước (WiFi, time, weather, DHT, Rain/Gas),
-     chỉ mở cửa bằng RFID hợp lệ. Touch chỉ đổi màn hình, độ nhạy tăng bằng cấu hình sampling.
+/* Home IoT - Final firmware
+   - UI & boot sequence like your original sketch (WiFi, NTP, weather, boot progress)
+   - Sensors: DHT22(17), Rain(32), MQ2 ADC(27), Touch TP223(25)
+   - OLED I2C SDA=23, SCL=22 (display layout same as original)
+   - RFID MFRC522 on custom SPI pins (SS=5,RST=21,SCK=18,MISO=19,MOSI=13)
+   - Buzzer = 12
+   - Servo SG90 = 14 (5V separate supply; GND common)
+   - Behavior:
+     * RFID valid -> open servo; keep door open for 5000 ms after the *last* valid scan
+     * repeatDelay between accepted scans = 2000 ms
+     * if scanned again during open period, reset timer (extend open)
 */
 
 #include <Arduino.h>
@@ -22,17 +21,17 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
-#include <MFRC522.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
 #include "DHT.h"
+#include <MFRC522.h>
 #include <ESP32Servo.h>
 
-// ====== WiFi ======
+// ===== WiFi =====
 const char* ssid = "NK203";
 const char* password = "12345678a@";
 
-// ====== OLED ======
+// ===== OLED =====
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
@@ -40,19 +39,18 @@ const char* password = "12345678a@";
 #define OLED_SCL 22
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// ====== DHT ======
+// ===== DHT22 =====
 #define DHTPIN 17
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
-// ====== sensors/actuators pins ======
+// ===== Sensors / pins =====
 #define RAIN_PIN 32
 #define GAS_PIN 27
 #define TOUCH_PIN 25
 #define BUZZER_PIN 12
-#define SERVO_PIN 14
 
-// ====== RFID SPI pins (no conflict) ======
+// ===== RFID SPI pins (no conflict) =====
 #define RST_PIN 21
 #define SS_PIN 5
 #define SCK_PIN 18
@@ -60,7 +58,14 @@ DHT dht(DHTPIN, DHTTYPE);
 #define MOSI_PIN 13
 MFRC522 mfrc(SS_PIN, RST_PIN);
 
-// ====== Time & Weather ======
+// ===== Servo =====
+#define SERVO_PIN 14
+Servo myServo;
+const int SERVO_OPEN_US = 1800;   // safer open
+const int SERVO_CLOSED_US = 1000; // closed
+const unsigned long SERVO_OPEN_MS = 5000; // keep open 5s
+
+// ===== Time & Weather =====
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60000); // GMT+7
 String city = "Hanoi";
@@ -68,48 +73,44 @@ String weatherMain = "--";
 String temperature = "--";
 String weatherIcon = "";
 unsigned long lastWeatherUpdate = 0;
-const unsigned long weatherUpdateInterval = 10 * 60 * 1000; // 10 min
+const unsigned long weatherUpdateInterval = 10 * 60 * 1000; // 10 minutes
 
-// ====== whitelist (4-byte UID) ======
+// ===== Whitelist (4-byte UID) =====
 const uint8_t whitelist[][4] = {
   {0xB1, 0xD7, 0x7F, 0x05}
 };
 const size_t whitelistCount = sizeof(whitelist) / sizeof(whitelist[0]);
 
-// ====== servo config ======
-Servo myServo;
-const int SERVO_OPEN_US = 1800;
-const int SERVO_CLOSED_US = 1000;
-const unsigned long SERVO_OPEN_MS = 5000;
-enum ServoState {CLOSED, OPENING, OPEN, CLOSING};
-ServoState servoState = CLOSED;
-unsigned long servoStateMillis = 0;
-
-// ====== timings & states ======
+// ===== Timers & state =====
 unsigned long lastDhtMillis = 0;
 const unsigned long DHT_INTERVAL = 2000;
 unsigned long lastSensorDisplayMillis = 0;
 const unsigned long SENSOR_DISPLAY_INTERVAL = 1000;
-unsigned long lastReadMillis = 0;
-unsigned long repeatDelay = 4000; // RFID debounce
 
-// ====== sensor values ======
+unsigned long lastReadMillis = 0;
+const unsigned long repeatDelay = 2000; // 2s between accepted RFID reads
+
+// Servo state machine
+enum ServoState { SERVO_CLOSED, SERVO_OPENING, SERVO_OPEN, SERVO_CLOSING };
+ServoState servoState = SERVO_CLOSED;
+unsigned long servoStateMillis = 0;
+
+// Sensor values
 float lastTemp = NAN;
 float lastHum = NAN;
 int gasRaw = 0;
 int rainState = HIGH;
 
-// ====== UI ======
-int screenIndex = 0; // 0 main,1 dht,2 rain/gas
-bool lastTouchState = false;
+// UI & touch
+int screenIndex = 0; // 0 main, 1 DHT, 2 Rain/Gas
+bool lastTouch = LOW;
 
-// ====== Touch sensitivity (software sampling) ======
-// Tăng độ nhạy: giảm TOUCH_THRESHOLD (số lần HIGH trong TOUCH_SAMPLES cần đạt -> nhỏ hơn = nhạy hơn)
-const int TOUCH_SAMPLES = 8;        // số mẫu đọc nhanh
-const int TOUCH_THRESHOLD = 2;     // nếu >= threshold mẫu là touch (giảm = nhạy hơn)
-const unsigned long TOUCH_SAMPLE_INTERVAL_MS = 6; // tổng khoảng thời gian lấy mẫu (ms)
+// Touch sampling to increase sensitivity (TP223)
+const int TOUCH_SAMPLES = 8;
+const int TOUCH_THRESHOLD = 2;
+const unsigned long TOUCH_SAMPLE_INTERVAL_MS = 6;
 
-// ====== helpers ======
+// ===== Helpers =====
 String hexByte(uint8_t b) {
   String s = String(b, HEX);
   if (s.length() == 1) s = "0" + s;
@@ -145,49 +146,68 @@ void beep(bool ok) {
   }
 }
 
-// ====== display screens (mimic previous UI) ======
+// ===== Display functions (match original UI) =====
 void showMainScreen() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  // WiFi status
-  display.setCursor(0,0);
-  display.printf("%s", WiFi.status() == WL_CONNECTED ? ssid : "No WiFi");
+  // ==== WiFi signal (4 bars) ====
+  int rssi = WiFi.RSSI();
+  int level = 0;
+  if (rssi > -50) level = 3;
+  else if (rssi > -70) level = 2;
+  else if (rssi > -85) level = 1;
+  else level = 0;
 
-  // weather + temp
-  display.setCursor(0,12);
+  // Vẽ 4 vạch ở góc trái trên
+  for (int i = 0; i < 4; i++) {
+    int x = 2 + i * 6;
+    int h = (i + 1) * 3;            // chiều cao mỗi bar
+    int y = 12 - h;                 // căn trái phía trên
+    if (i <= level) display.fillRect(x, y, 4, h, SSD1306_WHITE);
+    else display.drawRect(x, y, 4, h, SSD1306_WHITE);
+  }
+
+  // ==== WiFi SSID + IP (bên phải vạch) ====
+  display.setCursor(30, 0);
+  display.printf("%s", WiFi.status() == WL_CONNECTED ? ssid : "No WiFi");
+  display.setCursor(30, 10);
+  display.printf("%s", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "No IP");
+
+  // ==== Weather + temp (giữ như trước) ====
+  display.setCursor(0, 25);
   display.print(weatherIcon);
   display.print(" ");
   display.print(temperature);
   display.print("C  ");
-  if (weatherMain.length() > 10) display.print(weatherMain.substring(0,10));
+  if (weatherMain.length() > 10) display.print(weatherMain.substring(0, 10));
   else display.print(weatherMain);
 
-  // DHT
-  display.setCursor(0,28);
-  if (isnan(lastTemp) || isnan(lastHum)) display.println("Temp/Humi: --");
-  else display.printf("T:%.1fC H:%.0f%%", lastTemp, lastHum);
-
-  // time
+  // ==== Time (giữ giữa dưới) ====
   display.setTextSize(2);
   String timeStr = timeClient.getFormattedTime();
-  int16_t x1,y1; uint16_t w,h;
+  int16_t x1, y1; uint16_t w, h;
   display.getTextBounds(timeStr, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 44);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 46);
   display.print(timeStr);
 
   display.display();
 }
+
+
 void showDHTScreen() {
   display.clearDisplay();
   display.setTextSize(1);
-  display.setCursor(0,0);
+  display.setCursor(0, 0);
   display.println("TEMP / HUMIDITY");
-  display.setCursor(0,20);
+
   if (isnan(lastTemp) || isnan(lastHum)) {
+    display.setCursor(0, 20);
     display.println("Sensor Error!");
+    Serial.println("❌ Cannot read DHT22!");
   } else {
+    display.setCursor(0, 20);
     display.printf("Temp: %.1f C\n", lastTemp);
     display.printf("Humi: %.1f %%", lastHum);
   }
@@ -196,28 +216,29 @@ void showDHTScreen() {
 void showRainGasScreen() {
   display.clearDisplay();
   display.setTextSize(1);
-  display.setCursor(0,0);
+  display.setCursor(0, 0);
   display.println("RAIN / GAS STATUS");
-  display.setCursor(0,20);
+  display.setCursor(0, 20);
   display.printf("Rain: %s\n", rainState == LOW ? "Detected" : "None");
-  display.printf("Gas: %s", gasRaw < 2000 ? "Normal" : "ALERT"); // crude threshold
+  display.setCursor(0, 35);
+  display.printf("Gas: %s", gasRaw > 2000 ? "ALERT!" : "Normal");
   display.display();
 }
 void showUidScreen(const String &uidStr, bool ok) {
   display.clearDisplay();
   display.setTextSize(1);
-  display.setCursor(0,0);
+  display.setCursor(0, 0);
   display.println("RFID");
   display.setTextSize(2);
-  display.setCursor(0,18);
+  display.setCursor(0, 18);
   display.println(uidStr);
   display.setTextSize(1);
-  display.setCursor(0,52);
+  display.setCursor(0, 52);
   display.println(ok ? "Access: ALLOWED" : "Access: DENIED");
   display.display();
 }
 
-// ====== weather fetch ======
+// ===== Weather fetch (wttr.in) =====
 void getWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
   WiFiClientSecure client;
@@ -229,8 +250,8 @@ void getWeather() {
     if (httpCode == 200) {
       String payload = http.getString();
       StaticJsonDocument<2048> doc;
-      DeserializationError err = deserializeJson(doc, payload);
-      if (!err) {
+      DeserializationError error = deserializeJson(doc, payload);
+      if (!error) {
         JsonObject current = doc["current_condition"][0].as<JsonObject>();
         temperature = String((const char*) current["temp_C"]);
         weatherMain = String((const char*) current["weatherDesc"][0]["value"]);
@@ -240,18 +261,23 @@ void getWeather() {
         else if (wm.indexOf("cloud") >= 0) weatherIcon = "C";
         else if (wm.indexOf("sun") >= 0 || wm.indexOf("clear") >= 0) weatherIcon = "S";
         else weatherIcon = "-";
+      } else {
+        Serial.print("❌ JSON error: ");
+        Serial.println(error.c_str());
       }
+    } else {
+      Serial.printf("❌ HTTP Error: %d\n", httpCode);
     }
     http.end();
+  } else {
+    Serial.println("❌ HTTP begin fail");
   }
   lastWeatherUpdate = millis();
 }
 
-// ====== touch sampling to increase sensitivity ======
-bool readTouchHigh() {
-  // sample TOUCH_SAMPLES times quickly, count HIGHs
+// ===== Touch increased sensitivity (sampling) =====
+bool sampleTouchHigh() {
   int countHigh = 0;
-  unsigned long start = millis();
   for (int i = 0; i < TOUCH_SAMPLES; ++i) {
     if (digitalRead(TOUCH_PIN) == HIGH) countHigh++;
     delay(TOUCH_SAMPLE_INTERVAL_MS / TOUCH_SAMPLES);
@@ -259,34 +285,55 @@ bool readTouchHigh() {
   return (countHigh >= TOUCH_THRESHOLD);
 }
 
-// ====== servo state machine ======
+// ===== Servo state machine helpers =====
+void servoSetOpen() {
+  if (!myServo.attached()) myServo.attach(SERVO_PIN);
+  myServo.writeMicroseconds(SERVO_OPEN_US);
+}
+void servoSetClose() {
+  if (!myServo.attached()) myServo.attach(SERVO_PIN);
+  myServo.writeMicroseconds(SERVO_CLOSED_US);
+}
+
+// transition handler (non-blocking state machine uses servoState & servoStateMillis)
 void servoTransition(ServoState newState) {
   if (servoState == newState) return;
   servoState = newState;
   servoStateMillis = millis();
   switch (servoState) {
-    case OPENING:
-      if (!myServo.attached()) myServo.attach(SERVO_PIN);
-      myServo.writeMicroseconds(SERVO_OPEN_US);
+    case SERVO_OPENING:
+      servoSetOpen();
       break;
-    case OPEN:
-      // hold
+    case SERVO_OPEN:
+      // holding; timer managed in loop
       break;
-    case CLOSING:
-      myServo.writeMicroseconds(SERVO_CLOSED_US);
+    case SERVO_CLOSING:
+      servoSetClose();
       break;
-    case CLOSED:
+    case SERVO_CLOSED:
+      // detach to reduce jitter and idle current
       if (myServo.attached()) myServo.detach();
       break;
   }
 }
 
-// ====== setup ======
+// ===== Setup (boot progress like original) =====
+void drawProgress(int percent, const String &text = "") {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Booting system...");
+  display.drawRect(10, 25, 108, 10, SSD1306_WHITE);
+  display.fillRect(10, 25, percent * 108 / 100, 10, SSD1306_WHITE);
+  display.setCursor(10, 40);
+  display.printf("%3d%% %s", percent, text.c_str());
+  display.display();
+}
+
 void setup() {
   Serial.begin(115200);
-  delay(50);
 
-  // pins
   pinMode(RAIN_PIN, INPUT);
   pinMode(TOUCH_PIN, INPUT);
   pinMode(BUZZER_PIN, INPUT);
@@ -294,60 +341,96 @@ void setup() {
   // OLED
   Wire.begin(OLED_SDA, OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED not found!");
-    while (true) delay(1000);
+    Serial.println("❌ OLED not found!");
+    while (true);
   }
   display.clearDisplay();
   display.display();
 
-  // sensors
-  dht.begin();
+  // Boot UI
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Booting system...");
+  display.display();
+  delay(200);
 
-  // WiFi connect (non-blocking-ish)
+  int progress = 0;
+  drawProgress(progress, "Init modules");
+  delay(300);
+  // init sensors
+  dht.begin();
+  progress = 10;
+
+  // WiFi connect
+  drawProgress(progress, "Connecting WiFi");
   WiFi.begin(ssid, password);
-  int to = 0;
-  while (WiFi.status() != WL_CONNECTED && to < 30) {
+  int timeout = 0;
+  while (WiFi.status() != WL_CONNECTED && timeout < 30) {
     delay(500);
-    to++;
+    timeout++;
+    progress = 10 + timeout * 2;
+    if (progress > 50) progress = 50;
+    drawProgress(progress, "Connecting WiFi");
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected");
+    drawProgress(50, "WiFi OK");
+    Serial.println("✅ WiFi connected!");
+    Serial.println(WiFi.localIP());
   } else {
-    Serial.println("WiFi fail");
+    drawProgress(50, "WiFi FAIL");
+    Serial.println("⚠️ WiFi failed!");
   }
+
+  // NTP
+  drawProgress(60, "Syncing time");
   timeClient.begin();
   if (WiFi.status() == WL_CONNECTED) timeClient.update();
-  getWeather();
+  delay(400);
+  drawProgress(70, "Time OK");
 
-  // RFID init (custom SPI pins)
+  // Weather
+  drawProgress(75, "Loading weather");
+  if (WiFi.status() == WL_CONNECTED) getWeather();
+  delay(600);
+  drawProgress(100, "Done");
+  delay(300);
+
+  display.clearDisplay();
+  display.setCursor(25, 25);
+  display.setTextSize(2);
+  display.println("READY!");
+  display.display();
+  delay(700);
+
+  // RFID init
   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
   mfrc.PCD_Init();
-  Serial.println("MFRC522 ready");
+  Serial.println("✅ MFRC522 ready.");
 
-  // Servo: DO NOT attach at setup to avoid inrush at boot (brownout risk)
-  servoState = CLOSED;
+  // Servo: do NOT attach at setup (avoid brownout)
+  servoState = SERVO_CLOSED;
 
-  // initial display
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0,0);
-  display.println("Booting...");
-  display.display();
-  delay(500);
+  // show main
   showMainScreen();
+  lastDhtMillis = 0;
+  lastSensorDisplayMillis = 0;
+  lastWeatherUpdate = millis();
 }
 
-// ====== loop ======
+// ===== Loop =====
 void loop() {
   unsigned long now = millis();
 
-  // update time & weather periodically
+  // update NTP
   timeClient.update();
-  if (WiFi.status() == WL_CONNECTED && now - lastWeatherUpdate > weatherUpdateInterval) {
+
+  // update weather periodically
+  if (WiFi.status() == WL_CONNECTED && (now - lastWeatherUpdate > weatherUpdateInterval)) {
     getWeather();
   }
 
-  // sensors periodic
+  // read sensors periodically
   if (now - lastDhtMillis >= DHT_INTERVAL) {
     lastDhtMillis = now;
     float t = dht.readTemperature();
@@ -357,16 +440,24 @@ void loop() {
     rainState = digitalRead(RAIN_PIN);
   }
 
-  // touch sampling for screen change (edge detect)
-  bool touchNow = readTouchHigh();
-  if (touchNow && !lastTouchState) {
+  // handle touch sampling for screen switching (increase sensitivity)
+  bool touchNow = false;
+  // sample TOUCH_SAMPLES quickly
+  int countHigh = 0;
+  for (int i = 0; i < TOUCH_SAMPLES; ++i) {
+    if (digitalRead(TOUCH_PIN) == HIGH) countHigh++;
+    delay(TOUCH_SAMPLE_INTERVAL_MS / TOUCH_SAMPLES);
+  }
+  touchNow = (countHigh >= TOUCH_THRESHOLD);
+
+  if (touchNow && !lastTouch) {
     screenIndex = (screenIndex + 1) % 3;
     // small debounce
     delay(120);
   }
-  lastTouchState = touchNow;
+  lastTouch = touchNow;
 
-  // update display periodically (keeps original layout/time)
+  // update display periodically (keep original layout/time)
   if (now - lastSensorDisplayMillis >= SENSOR_DISPLAY_INTERVAL) {
     lastSensorDisplayMillis = now;
     switch (screenIndex) {
@@ -376,42 +467,66 @@ void loop() {
     }
   }
 
-  // servo state machine non-blocking
-  if (servoState == OPENING) {
-    servoState = OPEN;
+  // Servo state machine: OPENING -> OPEN -> auto-close only after SERVO_OPEN_MS from last valid access
+  if (servoState == SERVO_OPENING) {
+    // opening, immediately enter OPEN and set timer
+    servoState = SERVO_OPEN;
     servoStateMillis = now;
-  } else if (servoState == OPEN) {
+  } else if (servoState == SERVO_OPEN) {
+    // if time since last scan (servoStateMillis updated on each valid scan) exceeds open ms -> close
     if (now - servoStateMillis >= SERVO_OPEN_MS) {
-      servoTransition(CLOSING);
+      servoTransition(SERVO_CLOSING);
+      // set closing start time to now to measure motion
       servoStateMillis = now;
     }
-  } else if (servoState == CLOSING) {
+  } else if (servoState == SERVO_CLOSING) {
+    // after physical move time -> CLOSED
     if (now - servoStateMillis >= 700) {
-      servoTransition(CLOSED);
+      servoTransition(SERVO_CLOSED);
     }
   }
 
-  // RFID reading -> only RFID controls servo
+  // RFID reading: control servo; accepted scans must be >= repeatDelay apart
   if (mfrc.PICC_IsNewCardPresent() && mfrc.PICC_ReadCardSerial()) {
-    if (now - lastReadMillis >= repeatDelay) {
+    // always consume card, but only accept if enough time passed from last accepted read
+    unsigned long between = now - lastReadMillis;
+    String uidStr = uidToString(mfrc.uid);
+    bool ok = isWhitelisted(mfrc.uid);
+
+    if (between >= repeatDelay && ok) {
+      // accepted valid access
       lastReadMillis = now;
-      String uidStr = uidToString(mfrc.uid);
-      bool ok = isWhitelisted(mfrc.uid);
-      Serial.printf("Card: %s => %s\n", uidStr.c_str(), ok ? "ALLOWED" : "DENIED");
-      showUidScreen(uidStr, ok);
-      if (ok) {
-        beep(true);
-        // attach -> open -> will auto-close
-        if (!myServo.attached()) myServo.attach(SERVO_PIN);
-        delay(40);
-        servoTransition(OPENING);
+      Serial.printf("Card UID: %s -> ALLOWED\n", uidStr.c_str());
+      showUidScreen(uidStr, true);
+      beep(true);
+
+      // If already open or opening, reset timer to extend open period
+      if (servoState == SERVO_OPEN || servoState == SERVO_OPENING) {
+        // reset timer to extend
+        servoStateMillis = now;
       } else {
+        // not open: attach & open
+        if (!myServo.attached()) myServo.attach(SERVO_PIN);
+        delay(40); // allow servo to attach/stabilize
+        servoTransition(SERVO_OPENING);
+        // servoTransition will set SERVO_OPENING, loop will set to OPEN & set servoStateMillis
+      }
+    } else {
+      // either denied or too-frequent
+      if (!ok) {
+        Serial.printf("Card UID: %s -> DENIED\n", uidStr.c_str());
+        showUidScreen(uidStr, false);
         beep(false);
+      } else {
+        // too-frequent attempt — ignore but can show briefly
+        Serial.printf("Card UID: %s -> IGNORED (repeat too fast)\n", uidStr.c_str());
       }
     }
+
+    // Important cleanup for MFRC522
     mfrc.PICC_HaltA();
     mfrc.PCD_StopCrypto1();
-    delay(40);
+    delay(30); // tiny non-blocking pause
   }
 
   delay(10); // keep loop responsive
