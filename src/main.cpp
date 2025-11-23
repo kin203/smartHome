@@ -38,7 +38,7 @@ const char* password = "12345678a@";
 // ===== Backend API =====
 const char* backendURL = "http://192.168.100.53:5000"; // Change to your PC's IP
 String deviceMac = ""; // Will be set from ESP32 MAC address
-const char* firmwareVersion = "1.0.0"; // Firmware version
+const char* firmwareVersion = "1.0.1"; // Firmware version
 
 // ===== OLED =====
 #define SCREEN_WIDTH 128
