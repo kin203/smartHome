@@ -20,6 +20,10 @@
 #include <ArduinoJson.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
+#include <WebServer.h>
+
+WebServer server(80);
+
 
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
@@ -30,6 +34,11 @@
 // ===== WiFi =====
 const char* ssid = "NK203";
 const char* password = "12345678a@";
+
+// ===== Backend API =====
+const char* backendURL = "http://192.168.100.53:5000"; // Change to your PC's IP
+String deviceMac = ""; // Will be set from ESP32 MAC address
+const char* firmwareVersion = "1.0.0"; // Firmware version
 
 // ===== OLED =====
 #define SCREEN_WIDTH 128
@@ -64,6 +73,16 @@ Servo myServo;
 const int SERVO_OPEN_US = 1800;   // safer open
 const int SERVO_CLOSED_US = 1000; // closed
 const unsigned long SERVO_OPEN_MS = 5000; // keep open 5s
+
+// ===== Relay 4 kênh (điều khiển đèn) =====
+#define RELAY1_PIN 26  // Light 1
+#define RELAY2_PIN 33  // Light 2
+#define RELAY3_PIN 15  // Light 3
+#define RELAY4_PIN 2   // Light 4
+bool relay1State = false;
+bool relay2State = false;
+bool relay3State = false;
+bool relay4State = false;
 
 // ===== Time & Weather =====
 WiFiUDP ntpUDP;
@@ -101,6 +120,13 @@ float lastHum = NAN;
 int gasRaw = 0;
 int rainState = HIGH;
 
+// Backend connection status
+bool backendOnline = true;
+unsigned long lastBackendCheck = 0;
+const unsigned long BACKEND_CHECK_INTERVAL = 5000; // Check every 5s
+int consecutiveFailures = 0;
+const int MAX_FAILURES_BEFORE_OFFLINE = 2;
+
 // UI & touch
 int screenIndex = 0; // 0 main, 1 DHT, 2 Rain/Gas
 bool lastTouch = LOW;
@@ -125,17 +151,52 @@ String uidToString(MFRC522::Uid &uid) {
   }
   return s;
 }
-bool isWhitelisted(MFRC522::Uid &uid) {
-  if (uid.size < 4) return false;
-  for (size_t i = 0; i < whitelistCount; ++i) {
-    bool ok = true;
-    for (int j = 0; j < 4; ++j) {
-      if (whitelist[i][j] != uid.uidByte[j]) { ok = false; break; }
-    }
-    if (ok) return true;
+
+// Check card authorization via backend API
+bool isWhitelisted(String cardUID) {
+  if (WiFi.status() != WL_CONNECTED || deviceMac.length() == 0) {
+    Serial.println("⚠️ Cannot check card: WiFi disconnected or MAC not set");
+    backendOnline = false;
+    return false;
   }
-  return false;
+
+  HTTPClient http;
+  String url = String(backendURL) + "/api/rfid-cards/check";
+  http.begin(url);
+  http.setTimeout(3000); // 3 second timeout to prevent hanging
+  http.addHeader("Content-Type", "application/json");
+
+  StaticJsonDocument<128> doc;
+  doc["deviceMac"] = deviceMac;
+  doc["cardUID"] = cardUID;
+
+  String jsonBody;
+  serializeJson(doc, jsonBody);
+
+  int httpCode = http.POST(jsonBody);
+  bool authorized = false;
+
+  if (httpCode == 200) {
+    StaticJsonDocument<128> response;
+    DeserializationError error = deserializeJson(response, http.getString());
+    if (!error) {
+      authorized = response["authorized"];
+      Serial.printf("Card check: %s -> %s\n", cardUID.c_str(), authorized ? "AUTHORIZED" : "DENIED");
+      consecutiveFailures = 0;
+      backendOnline = true;
+    }
+  } else {
+    Serial.printf("❌ Card check failed: HTTP %d\n", httpCode);
+    consecutiveFailures++;
+    if (consecutiveFailures >= MAX_FAILURES_BEFORE_OFFLINE) {
+      backendOnline = false;
+    }
+  }
+
+  http.end();
+  return authorized;
 }
+
 void beep(bool ok) {
   pinMode(BUZZER_PIN, OUTPUT);
   if (ok) {
@@ -144,6 +205,38 @@ void beep(bool ok) {
   } else {
     digitalWrite(BUZZER_PIN, HIGH); delay(300); digitalWrite(BUZZER_PIN, LOW);
   }
+  pinMode(BUZZER_PIN, INPUT);
+}
+
+// Send access log to backend
+void sendAccessLog(String cardUID, bool accessGranted) {
+  if (WiFi.status() != WL_CONNECTED || deviceMac.length() == 0) {
+    Serial.println("⚠️ Cannot send log: WiFi disconnected or MAC not set");
+    return;
+  }
+
+  HTTPClient http;
+  String url = String(backendURL) + "/api/access-logs";
+  http.begin(url);
+  http.setTimeout(3000); // 3 second timeout to prevent hanging
+  http.addHeader("Content-Type", "application/json");
+
+  StaticJsonDocument<256> doc;
+  doc["deviceMac"] = deviceMac;
+  doc["cardUID"] = cardUID;
+  doc["accessGranted"] = accessGranted;
+  // Backend will auto-generate timestamp with Date.now()
+
+  String jsonBody;
+  serializeJson(doc, jsonBody);
+
+  int httpCode = http.POST(jsonBody);
+  if (httpCode > 0) {
+    Serial.printf("✅ Access log sent: %d\n", httpCode);
+  } else {
+    Serial.printf("❌ Access log failed: %s\n", http.errorToString(httpCode).c_str());
+  }
+  http.end();
 }
 
 // ===== Display functions (match original UI) =====
@@ -175,14 +268,20 @@ void showMainScreen() {
   display.setCursor(30, 10);
   display.printf("%s", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "No IP");
 
-  // ==== Weather + temp (giữ như trước) ====
-  display.setCursor(0, 25);
-  display.print(weatherIcon);
-  display.print(" ");
-  display.print(temperature);
-  display.print("C  ");
-  if (weatherMain.length() > 10) display.print(weatherMain.substring(0, 10));
-  else display.print(weatherMain);
+  // ==== Server status warning ====
+  if (!backendOnline) {
+    display.setCursor(0, 20);
+    display.print("Server Offline");
+  } else {
+    // ==== Weather + temp (giữ như trước) ====
+    display.setCursor(0, 25);
+    display.print(weatherIcon);
+    display.print(" ");
+    display.print(temperature);
+    display.print("C  ");
+    if (weatherMain.length() > 10) display.print(weatherMain.substring(0, 10));
+    else display.print(weatherMain);
+  }
 
   // ==== Time (giữ giữa dưới) ====
   display.setTextSize(2);
@@ -245,6 +344,7 @@ void getWeather() {
   client.setInsecure();
   HTTPClient http;
   String url = "https://wttr.in/" + city + "?format=j1";
+  http.setTimeout(5000); // 5 second timeout for weather API
   if (http.begin(client, url)) {
     int httpCode = http.GET();
     if (httpCode == 200) {
@@ -331,12 +431,25 @@ void drawProgress(int percent, const String &text = "") {
   display.display();
 }
 
+#include "web_handlers.h"
+
 void setup() {
+
   Serial.begin(115200);
 
   pinMode(RAIN_PIN, INPUT);
   pinMode(TOUCH_PIN, INPUT);
   pinMode(BUZZER_PIN, INPUT);
+  
+  // Init relay pins (LOW = OFF for active-HIGH relay)
+  pinMode(RELAY1_PIN, OUTPUT);
+  pinMode(RELAY2_PIN, OUTPUT);
+  pinMode(RELAY3_PIN, OUTPUT);
+  pinMode(RELAY4_PIN, OUTPUT);
+  digitalWrite(RELAY1_PIN, LOW);
+  digitalWrite(RELAY2_PIN, LOW);
+  digitalWrite(RELAY3_PIN, LOW);
+  digitalWrite(RELAY4_PIN, LOW);
 
   // OLED
   Wire.begin(OLED_SDA, OLED_SCL);
@@ -354,6 +467,19 @@ void setup() {
   display.println("Booting system...");
   display.display();
   delay(200);
+
+  // Get MAC address as unique device identifier
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  deviceMac = "";
+  for (int i = 0; i < 6; i++) {
+    if (i > 0) deviceMac += ":";
+    if (mac[i] < 0x10) deviceMac += "0"; // Add leading zero for single-digit hex
+    deviceMac += String(mac[i], HEX);
+  }
+  deviceMac.toUpperCase();
+  Serial.printf("📱 Device MAC: %s\n", deviceMac.c_str());
+  Serial.printf("ℹ️ Firmware Version: %s\n", firmwareVersion);
 
   int progress = 0;
   drawProgress(progress, "Init modules");
@@ -381,11 +507,6 @@ void setup() {
     drawProgress(50, "WiFi FAIL");
     Serial.println("⚠️ WiFi failed!");
   }
-
-  // NTP
-  drawProgress(60, "Syncing time");
-  timeClient.begin();
-  if (WiFi.status() == WL_CONNECTED) timeClient.update();
   delay(400);
   drawProgress(70, "Time OK");
 
@@ -395,6 +516,32 @@ void setup() {
   delay(600);
   drawProgress(100, "Done");
   delay(300);
+
+  // Auto-register device with backend
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = String(backendURL) + "/api/devices/register";
+    http.begin(url);
+    http.setTimeout(5000); // 5 second timeout for registration
+    http.addHeader("Content-Type", "application/json");
+
+    StaticJsonDocument<256> doc;
+    doc["mac"] = deviceMac;
+    doc["ip"] = WiFi.localIP().toString();
+    doc["name"] = "ESP32-" + deviceMac.substring(deviceMac.length() - 8);
+    doc["firmwareVersion"] = firmwareVersion;
+
+    String jsonBody;
+    serializeJson(doc, jsonBody);
+
+    int httpCode = http.POST(jsonBody);
+    if (httpCode > 0) {
+      Serial.printf("✅ Device registered: %d\n", httpCode);
+    } else {
+      Serial.printf("⚠️ Device registration failed: %d\n", httpCode);
+    }
+    http.end();
+  }
 
   display.clearDisplay();
   display.setCursor(25, 25);
@@ -416,14 +563,39 @@ void setup() {
   lastDhtMillis = 0;
   lastSensorDisplayMillis = 0;
   lastWeatherUpdate = millis();
+
+  // Web Server
+  server.on("/scan", HTTP_GET, handleScan);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/control", HTTP_POST, handleControl);
+  
+  // CORS preflight handler for OPTIONS requests
+  server.onNotFound([](){
+    if (server.method() == HTTP_OPTIONS) {
+      setCORS();
+      server.send(200, "text/plain", "");
+    } else {
+      server.send(404, "application/json", "{\"error\":\"Not found\"}");
+    }
+  });
+  
+  server.begin();
+  Serial.println("✅ HTTP server started");
 }
+
 
 // ===== Loop =====
 void loop() {
+  server.handleClient();
   unsigned long now = millis();
 
-  // update NTP
-  timeClient.update();
+
+  // update NTP (non-blocking with interval check)
+  static unsigned long lastNtpUpdate = 0;
+  if (now - lastNtpUpdate >= 60000) { // Update every 60 seconds
+    timeClient.update();
+    lastNtpUpdate = now;
+  }
 
   // update weather periodically
   if (WiFi.status() == WL_CONNECTED && (now - lastWeatherUpdate > weatherUpdateInterval)) {
@@ -440,15 +612,8 @@ void loop() {
     rainState = digitalRead(RAIN_PIN);
   }
 
-  // handle touch sampling for screen switching (increase sensitivity)
-  bool touchNow = false;
-  // sample TOUCH_SAMPLES quickly
-  int countHigh = 0;
-  for (int i = 0; i < TOUCH_SAMPLES; ++i) {
-    if (digitalRead(TOUCH_PIN) == HIGH) countHigh++;
-    delay(TOUCH_SAMPLE_INTERVAL_MS / TOUCH_SAMPLES);
-  }
-  touchNow = (countHigh >= TOUCH_THRESHOLD);
+  // handle touch for screen switching (simple debounce, no delays)
+  bool touchNow = digitalRead(TOUCH_PIN) == HIGH;
 
   if (touchNow && !lastTouch) {
     screenIndex = (screenIndex + 1) % 3;
@@ -476,6 +641,8 @@ void loop() {
     // if time since last scan (servoStateMillis updated on each valid scan) exceeds open ms -> close
     if (now - servoStateMillis >= SERVO_OPEN_MS) {
       servoTransition(SERVO_CLOSING);
+      // Log auto-close event
+      sendAccessLog("DOOR_AUTO_CLOSE", true);
       // set closing start time to now to measure motion
       servoStateMillis = now;
     }
@@ -491,7 +658,8 @@ void loop() {
     // always consume card, but only accept if enough time passed from last accepted read
     unsigned long between = now - lastReadMillis;
     String uidStr = uidToString(mfrc.uid);
-    bool ok = isWhitelisted(mfrc.uid);
+    bool ok = isWhitelisted(uidStr);
+
 
     if (between >= repeatDelay && ok) {
       // accepted valid access
@@ -499,6 +667,7 @@ void loop() {
       Serial.printf("Card UID: %s -> ALLOWED\n", uidStr.c_str());
       showUidScreen(uidStr, true);
       beep(true);
+      sendAccessLog(uidStr, true); // Log to backend
 
       // If already open or opening, reset timer to extend open period
       if (servoState == SERVO_OPEN || servoState == SERVO_OPENING) {
@@ -509,7 +678,8 @@ void loop() {
         if (!myServo.attached()) myServo.attach(SERVO_PIN);
         delay(40); // allow servo to attach/stabilize
         servoTransition(SERVO_OPENING);
-        // servoTransition will set SERVO_OPENING, loop will set to OPEN & set servoStateMillis
+        // Log door open after RFID access
+        sendAccessLog("DOOR_OPEN (RFID)", true);
       }
     } else {
       // either denied or too-frequent
@@ -517,6 +687,7 @@ void loop() {
         Serial.printf("Card UID: %s -> DENIED\n", uidStr.c_str());
         showUidScreen(uidStr, false);
         beep(false);
+        sendAccessLog(uidStr, false); // Log denied access
       } else {
         // too-frequent attempt — ignore but can show briefly
         Serial.printf("Card UID: %s -> IGNORED (repeat too fast)\n", uidStr.c_str());
