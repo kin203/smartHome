@@ -3,3 +3,6 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+be_fe/be/.env
+/be_fe/be/node_modules
+/be_fe/fe/node_modules
