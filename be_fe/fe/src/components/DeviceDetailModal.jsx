@@ -167,18 +167,53 @@ const DeviceDetailModal = ({ device, isOpen, onClose }) => {
 
                         {activeTab === 'relay' && (
                             <div className="space-y-4">
-                                <h3 className="text-xl font-bold text-gray-800 mb-4">💡 Light Control (Relay 4 Channel)</h3>
-                                {[1, 2, 3, 4].map(channel => (
-                                    <div key={channel} className={`flex items-center justify-between p-6 rounded-xl ${status[`relay${channel}`] ? 'bg-gradient-to-r from-yellow-100 to-yellow-200' : 'bg-gray-100'}`}>
-                                        <div>
-                                            <div className="text-lg font-bold">Light {channel}</div>
-                                            <div className="text-sm text-gray-600">GPIO {channel === 1 ? '26' : channel === 2 ? '33' : channel === 3 ? '15' : '2'}</div>
-                                        </div>
-                                        <button onClick={() => toggleRelay(channel)} disabled={loading} className={`w-20 h-10 rounded-full p-1 transition-all ${status[`relay${channel}`] ? 'bg-yellow-500' : 'bg-gray-300'}`}>
-                                            <div className={`bg-white w-8 h-8 rounded-full shadow-md transform transition-transform ${status[`relay${channel}`] ? 'translate-x-10' : 'translate-x-0'}`} />
-                                        </button>
+                                <h3 className="text-xl font-bold text-gray-800 mb-4">💡 Light Control</h3>
+                                <p className="text-sm text-gray-600 mb-4">Control 3 LEDs connected to your ESP32</p>
+
+                                {/* LED 1 */}
+                                <div className={`flex items-center justify-between p-6 rounded-xl transition-all ${status['relay1'] ? 'bg-gradient-to-r from-yellow-100 to-yellow-200 shadow-md' : 'bg-gray-100'}`}>
+                                    <div>
+                                        <div className="text-lg font-bold">Phòng ngủ (LED 1)</div>
+                                        <div className="text-sm text-gray-600">GPIO 32</div>
                                     </div>
-                                ))}
+                                    <button
+                                        onClick={() => toggleRelay(1)}
+                                        disabled={loading}
+                                        className={`relative w-20 h-10 rounded-full p-1 transition-all ${status['relay1'] ? 'bg-yellow-500' : 'bg-gray-300'}`}
+                                    >
+                                        <div className={`bg-white w-8 h-8 rounded-full shadow-md transform transition-transform ${status['relay1'] ? 'translate-x-10' : 'translate-x-0'}`} />
+                                    </button>
+                                </div>
+
+                                {/* LED 2 */}
+                                <div className={`flex items-center justify-between p-6 rounded-xl transition-all ${status['relay2'] ? 'bg-gradient-to-r from-blue-100 to-blue-200 shadow-md' : 'bg-gray-100'}`}>
+                                    <div>
+                                        <div className="text-lg font-bold">Bếp (LED 2)</div>
+                                        <div className="text-sm text-gray-600">GPIO 26</div>
+                                    </div>
+                                    <button
+                                        onClick={() => toggleRelay(2)}
+                                        disabled={loading}
+                                        className={`relative w-20 h-10 rounded-full p-1 transition-all ${status['relay2'] ? 'bg-blue-500' : 'bg-gray-300'}`}
+                                    >
+                                        <div className={`bg-white w-8 h-8 rounded-full shadow-md transform transition-transform ${status['relay2'] ? 'translate-x-10' : 'translate-x-0'}`} />
+                                    </button>
+                                </div>
+
+                                {/* LED 3 */}
+                                <div className={`flex items-center justify-between p-6 rounded-xl transition-all ${status['relay3'] ? 'bg-gradient-to-r from-green-100 to-green-200 shadow-md' : 'bg-gray-100'}`}>
+                                    <div>
+                                        <div className="text-lg font-bold">Phòng khách (LED 3)</div>
+                                        <div className="text-sm text-gray-600">GPIO 15</div>
+                                    </div>
+                                    <button
+                                        onClick={() => toggleRelay(3)}
+                                        disabled={loading}
+                                        className={`relative w-20 h-10 rounded-full p-1 transition-all ${status['relay3'] ? 'bg-green-500' : 'bg-gray-300'}`}
+                                    >
+                                        <div className={`bg-white w-8 h-8 rounded-full shadow-md transform transition-transform ${status['relay3'] ? 'translate-x-10' : 'translate-x-0'}`} />
+                                    </button>
+                                </div>
                             </div>
                         )}
 
@@ -195,6 +230,65 @@ const DeviceDetailModal = ({ device, isOpen, onClose }) => {
                                 <div className="bg-white rounded-xl p-6 border border-gray-200">
                                     <h3 className="text-xl font-bold text-gray-800 mb-4">⚙️ Device Setup</h3>
 
+                                    {/* Channel Setup */}
+                                    {device.channels && device.channels.length > 0 && (
+                                        <div className="mb-6 border-b border-gray-200 pb-6">
+                                            <h4 className="font-bold text-gray-700 mb-4">Channels Configuration</h4>
+                                            {device.channels.map((channel, idx) => (
+                                                <div key={idx} className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-100">
+                                                    <div className="font-bold text-sm text-gray-500 mb-2">Channel {channel.index}</div>
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <div>
+                                                            <label className="block text-xs font-medium text-gray-500 mb-1">Name</label>
+                                                            <input
+                                                                type="text"
+                                                                defaultValue={channel.name}
+                                                                id={`channel-name-${idx}`}
+                                                                className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs font-medium text-gray-500 mb-1">Room</label>
+                                                            <select
+                                                                defaultValue={channel.room || 'Living Room'}
+                                                                id={`channel-room-${idx}`}
+                                                                className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+                                                            >
+                                                                <option value="Phòng Khách">Phòng Khách</option>
+                                                                <option value="Phòng Ngủ">Phòng Ngủ</option>
+                                                                <option value="Nhà Bếp">Nhà Bếp</option>
+                                                                <option value="Khác">Khác</option>
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                            <button
+                                                onClick={async () => {
+                                                    const updatedChannels = device.channels.map((ch, idx) => ({
+                                                        ...ch,
+                                                        name: document.getElementById(`channel-name-${idx}`).value,
+                                                        room: document.getElementById(`channel-room-${idx}`).value
+                                                    }));
+
+                                                    try {
+                                                        await axios.put(`/devices/${device._id}`, {
+                                                            channels: updatedChannels
+                                                        });
+                                                        alert('Channel settings saved!');
+                                                        window.location.reload();
+                                                    } catch (err) {
+                                                        console.error(err);
+                                                        alert('Failed to save channels');
+                                                    }
+                                                }}
+                                                className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition-colors text-sm"
+                                            >
+                                                Save Channels
+                                            </button>
+                                        </div>
+                                    )}
+
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         {/* Read-only Info */}
                                         <div className="space-y-4">
@@ -210,6 +304,18 @@ const DeviceDetailModal = ({ device, isOpen, onClose }) => {
                                                 <label className="block text-sm font-medium text-gray-500">Firmware Version</label>
                                                 <div className="text-lg font-mono bg-gray-50 p-2 rounded border border-gray-200">{device.firmwareVersion || 'Unknown'}</div>
                                             </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-500 mb-2">System Update</label>
+                                                <button
+                                                    onClick={() => window.open(`http://${device.ip}/update`, '_blank')}
+                                                    className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded transition-colors flex items-center justify-center gap-2"
+                                                >
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V7z" clipRule="evenodd" />
+                                                    </svg>
+                                                    Update Firmware (OTA)
+                                                </button>
+                                            </div>
                                         </div>
 
                                         {/* Editable Settings */}
@@ -224,6 +330,19 @@ const DeviceDetailModal = ({ device, isOpen, onClose }) => {
                                                 />
                                             </div>
                                             <div>
+                                                <label className="block text-sm font-medium text-gray-700">Room (Device Default)</label>
+                                                <select
+                                                    id="setup-room"
+                                                    defaultValue={device.room || 'Khác'}
+                                                    className="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                                >
+                                                    <option value="Phòng Khách">Phòng Khách</option>
+                                                    <option value="Phòng Ngủ">Phòng Ngủ</option>
+                                                    <option value="Nhà Bếp">Nhà Bếp</option>
+                                                    <option value="Khác">Khác</option>
+                                                </select>
+                                            </div>
+                                            <div>
                                                 <label className="block text-sm font-medium text-gray-700">Settings Password</label>
                                                 <input
                                                     type="text"
@@ -236,10 +355,12 @@ const DeviceDetailModal = ({ device, isOpen, onClose }) => {
                                             <button
                                                 onClick={async () => {
                                                     const name = document.getElementById('setup-name').value;
+                                                    const room = document.getElementById('setup-room').value;
                                                     const password = document.getElementById('setup-password').value;
                                                     try {
                                                         await axios.put(`/devices/${device._id}`, {
                                                             name,
+                                                            room,
                                                             settingsPassword: password
                                                         });
                                                         alert('Settings saved!');

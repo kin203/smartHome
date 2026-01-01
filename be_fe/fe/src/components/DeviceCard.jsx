@@ -79,8 +79,8 @@ const DeviceCard = ({ device, onDelete, onUpdate, onOpenDetail }) => {
         <div
             onClick={handleCardClick}
             className={`relative overflow-hidden rounded-2xl p-6 transition-all duration-300 ${!isOnline
-                    ? 'bg-gray-200 opacity-60 cursor-not-allowed'
-                    : `cursor-pointer hover:scale-105 ${isOn ? 'bg-gradient-to-br from-blue-500 to-blue-600 shadow-lg shadow-blue-500/30' : 'bg-white shadow-md hover:shadow-lg'}`
+                ? 'bg-gray-200 opacity-60 cursor-not-allowed'
+                : `cursor-pointer hover:scale-105 ${isOn ? 'bg-gradient-to-br from-blue-500 to-blue-600 shadow-lg shadow-blue-500/30' : 'bg-white shadow-md hover:shadow-lg'}`
                 }`}
         >
             {/* Offline badge */}
@@ -92,8 +92,8 @@ const DeviceCard = ({ device, onDelete, onUpdate, onOpenDetail }) => {
 
             <div className="flex justify-between items-start mb-4">
                 <div className={`text-4xl p-3 rounded-xl ${!isOnline
-                        ? 'bg-gray-300 text-gray-500'
-                        : isOn ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-600'
+                    ? 'bg-gray-300 text-gray-500'
+                    : isOn ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-600'
                     }`}>
                     {getIcon()}
                 </div>
@@ -101,8 +101,8 @@ const DeviceCard = ({ device, onDelete, onUpdate, onOpenDetail }) => {
                     onClick={(e) => { e.stopPropagation(); handleDelete(); }}
                     disabled={!isOnline}
                     className={`p-2 rounded-full transition-colors ${!isOnline
-                            ? 'text-gray-400 cursor-not-allowed'
-                            : isOn ? 'text-white/70 hover:text-white hover:bg-white/20' : 'text-gray-400 hover:text-red-500 hover:bg-red-50'
+                        ? 'text-gray-400 cursor-not-allowed'
+                        : isOn ? 'text-white/70 hover:text-white hover:bg-white/20' : 'text-gray-400 hover:text-red-500 hover:bg-red-50'
                         }`}
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -130,8 +130,8 @@ const DeviceCard = ({ device, onDelete, onUpdate, onOpenDetail }) => {
                     onClick={(e) => { e.stopPropagation(); toggleStatus(); }}
                     disabled={isLoading || !isOnline}
                     className={`w-12 h-6 rounded-full p-1 transition-colors duration-300 ease-in-out ${!isOnline
-                            ? 'bg-gray-300 cursor-not-allowed'
-                            : isOn ? 'bg-white/30' : 'bg-gray-200'
+                        ? 'bg-gray-300 cursor-not-allowed'
+                        : isOn ? 'bg-white/30' : 'bg-gray-200'
                         }`}
                 >
                     <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform duration-300 ease-in-out ${isOn ? 'translate-x-6' : 'translate-x-0'}`} />

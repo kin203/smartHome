@@ -4,6 +4,7 @@ import axios from '../api/axios';
 const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
     const [name, setName] = useState('');
     const [type, setType] = useState('Light');
+    const [room, setRoom] = useState('Phòng Khách');
     const [isLoading, setIsLoading] = useState(false);
 
     if (!isOpen) return null;
@@ -12,10 +13,11 @@ const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
         e.preventDefault();
         setIsLoading(true);
         try {
-            const response = await axios.post('/devices', { name, type });
+            const response = await axios.post('/devices', { name, type, room });
             onAdd(response.data);
             setName('');
             setType('Light');
+            setRoom('Phòng Khách');
             onClose();
         } catch (error) {
             console.error('Error adding device:', error);
@@ -58,6 +60,22 @@ const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
                             <option value="Sensor">Sensor</option>
                             <option value="Switch">Switch</option>
                             <option value="Other">Other</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">
+                            Room
+                        </label>
+                        <select
+                            className="w-full px-4 py-3 rounded-lg bg-gray-50 border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition-all"
+                            value={room}
+                            onChange={(e) => setRoom(e.target.value)}
+                        >
+                            <option value="Phòng Khách">Phòng Khách</option>
+                            <option value="Phòng Ngủ">Phòng Ngủ</option>
+                            <option value="Nhà Bếp">Nhà Bếp</option>
+                            <option value="Khác">Khác</option>
                         </select>
                     </div>
 

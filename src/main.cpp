@@ -1,14 +1,23 @@
 /* Home IoT - Final firmware
    - UI & boot sequence like your original sketch (WiFi, NTP, weather, boot progress)
-   - Sensors: DHT22(17), Rain(32), MQ2 ADC(27), Touch TP223(25)
+   - Sensors: DHT22(27), Rain(17), MQ2 ADC(34), Light Sensor(33), Touch TP223(25)
    - OLED I2C SDA=23, SCL=22 (display layout same as original)
    - RFID MFRC522 on custom SPI pins (SS=5,RST=21,SCK=18,MISO=19,MOSI=13)
    - Buzzer = 12
-   - Servo SG90 = 14 (5V separate supply; GND common)
+   - Servos: 
+     * Gate Right Wing SG90 = 16 (5V separate supply; GND common)
+     * Gate Left Wing SG90 = 14 (5V separate supply; GND common)
+     * Rain Cover SG90 = 4 (auto-opens 90° when rain detected)
+   - Lights (controlled via MOSFET/Relay):
+     * LED1 = 32 (via MOSFET A3400 gate, init LOW on boot)
+     * LED2 = 15
+     * LED3 = 22
    - Behavior:
      * RFID valid -> open servo; keep door open for 5000 ms after the *last* valid scan
      * repeatDelay between accepted scans = 2000 ms
      * if scanned again during open period, reset timer (extend open)
+     * Rain detected -> rain cover opens 90° clockwise automatically
+     * Touch button -> toggle LED1 on/off
 */
 
 #include <Arduino.h>
@@ -36,9 +45,10 @@ const char* ssid = "NK203";
 const char* password = "12345678a@";
 
 // ===== Backend API =====
-const char* backendURL = "http://192.168.100.53:5000"; // Change to your PC's IP
+const char* backendURL = "http://192.168.100.23:5000"; // Change to your PC's IP
 String deviceMac = ""; // Will be set from ESP32 MAC address
-const char* firmwareVersion = "1.0.1"; // Firmware version
+const char* firmwareVersion = "1.0.2 fw-Stable"; // Firmware version
+bool deviceRegistered = false; // Flag to track registration status
 
 // ===== OLED =====
 #define SCREEN_WIDTH 128
@@ -49,14 +59,17 @@ const char* firmwareVersion = "1.0.1"; // Firmware version
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // ===== DHT22 =====
-#define DHTPIN 17
+#define DHTPIN 27         // DHT22 temperature & humidity sensor
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
 // ===== Sensors / pins =====
-#define RAIN_PIN 32
-#define GAS_PIN 27
-#define TOUCH_PIN 25
+#define RAIN_PIN 17       // Cảm biến mưa (digital)
+#define LIGHT_PIN 34      // Cảm biến ánh sáng (analog) - chuyển từ 33
+#define GAS_PIN 35        // Cảm biến gas MQ2 (analog)
+#define TOUCH_PIN 25      // Touch button - toggle LED3 (GPIO 15)
+#define SWITCH2_PIN 33    // Switch 2 - toggle LED2 (GPIO 26)
+#define SWITCH3_PIN 39    // Switch 3 (VN) - toggle LED1 (GPIO 32) - Requires External Pull-up!
 #define BUZZER_PIN 12
 
 // ===== RFID SPI pins (no conflict) =====
@@ -68,21 +81,33 @@ DHT dht(DHTPIN, DHTTYPE);
 MFRC522 mfrc(SS_PIN, RST_PIN);
 
 // ===== Servo =====
-#define SERVO_PIN 14
-Servo myServo;
-const int SERVO_OPEN_US = 1800;   // safer open
-const int SERVO_CLOSED_US = 1000; // closed
+// Gate servos (2 wings) - SWAPPED pins
+#define SERVO_RIGHT_PIN 16  // Right gate wing (updated)
+#define SERVO_LEFT_PIN 14   // Left gate wing (updated)
+Servo servoRight;
+Servo servoLeft;
+// Servo directions (cửa phải đảo ngược)
+const int SERVO_RIGHT_OPEN_US = 1800;   // Cửa phải: đảo ngược (open)
+const int SERVO_RIGHT_CLOSED_US = 1000; // Cửa phải: đảo ngược (closed)
+const int SERVO_LEFT_OPEN_US = 1000;    // Cửa trái: bình thường (open)
+const int SERVO_LEFT_CLOSED_US = 1800;  // Cửa trái: bình thường (closed)
 const unsigned long SERVO_OPEN_MS = 5000; // keep open 5s
 
-// ===== Relay 4 kênh (điều khiển đèn) =====
-#define RELAY1_PIN 26  // Light 1
-#define RELAY2_PIN 33  // Light 2
-#define RELAY3_PIN 15  // Light 3
-#define RELAY4_PIN 2   // Light 4
-bool relay1State = false;
-bool relay2State = false;
-bool relay3State = false;
-bool relay4State = false;
+// Rain cover servo (Giàn phơi)
+#define SERVO_RAIN_PIN 4   // GPIO 4
+Servo servoRain;
+const int RAIN_COVER_OPEN_US = 1500;   // 90 degrees (Rain detected)
+const int RAIN_COVER_CLOSED_US = 544;  // 0 degrees (No Rain)
+bool rainCoverIsOpen = false;
+
+// ===== LEDs (điều khiển đèn) =====
+#define LED1_PIN 32    // LED 1 - qua MOSFET A3400 gate
+#define LED2_PIN 26    // LED 2
+#define LED3_PIN 15    // LED 3
+#define LED_AUTO_PIN 2 // LED Auto (Light Sensor control)
+bool led1State = false;  // Controlled by TOUCH_PIN (GPIO 25)
+bool led2State = false;  // Controlled by SWITCH2_PIN (GPIO 33)
+bool led3State = false;  // Controlled by SWITCH3_PIN (VN/39)
 
 // ===== Time & Weather =====
 WiFiUDP ntpUDP;
@@ -127,9 +152,10 @@ const unsigned long BACKEND_CHECK_INTERVAL = 5000; // Check every 5s
 int consecutiveFailures = 0;
 const int MAX_FAILURES_BEFORE_OFFLINE = 2;
 
-// UI & touch
-int screenIndex = 0; // 0 main, 1 DHT, 2 Rain/Gas
+// UI & touch (touch now controls LED1, not screen switching)
+int screenIndex = 0; // Always show main screen
 bool lastTouch = LOW;
+int lightRaw = 0;    // Light sensor reading
 
 // Touch sampling to increase sensitivity (TP223)
 const int TOUCH_SAMPLES = 8;
@@ -235,6 +261,37 @@ void sendAccessLog(String cardUID, bool accessGranted) {
     Serial.printf("✅ Access log sent: %d\n", httpCode);
   } else {
     Serial.printf("❌ Access log failed: %s\n", http.errorToString(httpCode).c_str());
+  }
+  http.end();
+}
+
+// Function to register device (extracted for retry logic)
+void registerDeviceToBackend() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  String url = String(backendURL) + "/api/devices/register";
+  http.begin(url);
+  http.setTimeout(5000); // 5 second timeout
+  http.addHeader("Content-Type", "application/json");
+
+  StaticJsonDocument<256> doc;
+  doc["mac"] = deviceMac;
+  doc["ip"] = WiFi.localIP().toString();
+  doc["name"] = "ESP32-" + deviceMac.substring(deviceMac.length() - 8);
+  doc["firmwareVersion"] = firmwareVersion;
+
+  String jsonBody;
+  serializeJson(doc, jsonBody);
+
+  int httpCode = http.POST(jsonBody);
+  if (httpCode > 0) {
+    Serial.printf("✅ Device registered successfully: %d\n", httpCode);
+    deviceRegistered = true;
+    backendOnline = true;
+  } else {
+    Serial.printf("⚠️ Device registration failed: %s (Code: %d)\n", http.errorToString(httpCode).c_str(), httpCode);
+    backendOnline = false;
   }
   http.end();
 }
@@ -387,12 +444,32 @@ bool sampleTouchHigh() {
 
 // ===== Servo state machine helpers =====
 void servoSetOpen() {
-  if (!myServo.attached()) myServo.attach(SERVO_PIN);
-  myServo.writeMicroseconds(SERVO_OPEN_US);
+  if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
+  if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
+  servoRight.writeMicroseconds(SERVO_RIGHT_OPEN_US);  // Cửa phải
+  servoLeft.writeMicroseconds(SERVO_LEFT_OPEN_US);    // Cửa trái
+  Serial.printf("🚪 Gate OPEN: Right=%dus, Left=%dus\n", SERVO_RIGHT_OPEN_US, SERVO_LEFT_OPEN_US);
 }
 void servoSetClose() {
-  if (!myServo.attached()) myServo.attach(SERVO_PIN);
-  myServo.writeMicroseconds(SERVO_CLOSED_US);
+  if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
+  if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
+  servoRight.writeMicroseconds(SERVO_RIGHT_CLOSED_US);  // Cửa phải
+  servoLeft.writeMicroseconds(SERVO_LEFT_CLOSED_US);    // Cửa trái
+  Serial.printf("🚪 Gate CLOSE: Right=%dus, Left=%dus\n", SERVO_RIGHT_CLOSED_US, SERVO_LEFT_CLOSED_US);
+}
+
+// Rain cover servo control
+void rainCoverOpen() {
+  if (!servoRain.attached()) servoRain.attach(SERVO_RAIN_PIN);
+  servoRain.writeMicroseconds(RAIN_COVER_OPEN_US);
+  rainCoverIsOpen = true;
+  Serial.println("☂️ Rain cover opened (90°)");
+}
+void rainCoverClose() {
+  if (!servoRain.attached()) servoRain.attach(SERVO_RAIN_PIN);
+  servoRain.writeMicroseconds(RAIN_COVER_CLOSED_US);
+  rainCoverIsOpen = false;
+  Serial.println("☂️ Rain cover closed (0°)");
 }
 
 // transition handler (non-blocking state machine uses servoState & servoStateMillis)
@@ -412,7 +489,8 @@ void servoTransition(ServoState newState) {
       break;
     case SERVO_CLOSED:
       // detach to reduce jitter and idle current
-      if (myServo.attached()) myServo.detach();
+      if (servoRight.attached()) servoRight.detach();
+      if (servoLeft.attached()) servoLeft.detach();
       break;
   }
 }
@@ -431,6 +509,7 @@ void drawProgress(int percent, const String &text = "") {
   display.display();
 }
 
+#include <Update.h>
 #include "web_handlers.h"
 
 void setup() {
@@ -438,18 +517,24 @@ void setup() {
   Serial.begin(115200);
 
   pinMode(RAIN_PIN, INPUT);
-  pinMode(TOUCH_PIN, INPUT);
+  pinMode(TOUCH_PIN, INPUT);           // TTP223 Touch: Active HIGH (GPIO 25)
+  pinMode(SWITCH2_PIN, INPUT_PULLUP);  // Mechanical Switch: Active LOW (GPIO 33)
+  pinMode(SWITCH3_PIN, INPUT);         // TTP223 Touch: Active HIGH (GPIO 39/VN) - No Resistor needed
   pinMode(BUZZER_PIN, INPUT);
   
-  // Init relay pins (LOW = OFF for active-HIGH relay)
-  pinMode(RELAY1_PIN, OUTPUT);
-  pinMode(RELAY2_PIN, OUTPUT);
-  pinMode(RELAY3_PIN, OUTPUT);
-  pinMode(RELAY4_PIN, OUTPUT);
-  digitalWrite(RELAY1_PIN, LOW);
-  digitalWrite(RELAY2_PIN, LOW);
-  digitalWrite(RELAY3_PIN, LOW);
-  digitalWrite(RELAY4_PIN, LOW);
+  // Init LED pins (3 LEDs total)
+  pinMode(LED1_PIN, OUTPUT);
+  digitalWrite(LED1_PIN, LOW);  // CRITICAL: Set LOW immediately for MOSFET safety
+  pinMode(LED2_PIN, OUTPUT);
+  digitalWrite(LED2_PIN, LOW);
+  pinMode(LED3_PIN, OUTPUT);
+  digitalWrite(LED3_PIN, LOW);
+  pinMode(LED_AUTO_PIN, OUTPUT);
+  digitalWrite(LED_AUTO_PIN, LOW);
+  
+  led1State = false;
+  led2State = false;
+  led3State = false;
 
   // OLED
   Wire.begin(OLED_SDA, OLED_SCL);
@@ -519,28 +604,11 @@ void setup() {
 
   // Auto-register device with backend
   if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    String url = String(backendURL) + "/api/devices/register";
-    http.begin(url);
-    http.setTimeout(5000); // 5 second timeout for registration
-    http.addHeader("Content-Type", "application/json");
-
-    StaticJsonDocument<256> doc;
-    doc["mac"] = deviceMac;
-    doc["ip"] = WiFi.localIP().toString();
-    doc["name"] = "ESP32-" + deviceMac.substring(deviceMac.length() - 8);
-    doc["firmwareVersion"] = firmwareVersion;
-
-    String jsonBody;
-    serializeJson(doc, jsonBody);
-
-    int httpCode = http.POST(jsonBody);
-    if (httpCode > 0) {
-      Serial.printf("✅ Device registered: %d\n", httpCode);
-    } else {
-      Serial.printf("⚠️ Device registration failed: %d\n", httpCode);
+    drawProgress(90, "Registering...");
+    registerDeviceToBackend();
+    if (!deviceRegistered) {
+      Serial.println("⚠️ Initial registration failed, will retry in loop");
     }
-    http.end();
   }
 
   display.clearDisplay();
@@ -568,6 +636,14 @@ void setup() {
   server.on("/scan", HTTP_GET, handleScan);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/control", HTTP_POST, handleControl);
+
+  // OTA Updates
+  server.on("/update", HTTP_GET, handleOTA);
+  server.on("/update", HTTP_POST, []() {
+    server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
+    delay(1000);
+    ESP.restart();
+  }, handleOTAUpload);
   
   // CORS preflight handler for OPTIONS requests
   server.onNotFound([](){
@@ -591,10 +667,19 @@ void loop() {
 
 
   // update NTP (non-blocking with interval check)
+  // update NTP (non-blocking with interval check)
   static unsigned long lastNtpUpdate = 0;
   if (now - lastNtpUpdate >= 60000) { // Update every 60 seconds
     timeClient.update();
     lastNtpUpdate = now;
+  }
+
+  // Retry registration if not yet registered (every 15 seconds)
+  static unsigned long lastRegRetry = 0;
+  if (!deviceRegistered && WiFi.status() == WL_CONNECTED && (now - lastRegRetry > 15000)) {
+    Serial.println("🔄 Retrying device registration...");
+    registerDeviceToBackend();
+    lastRegRetry = now;
   }
 
   // update weather periodically
@@ -608,28 +693,67 @@ void loop() {
     float t = dht.readTemperature();
     float h = dht.readHumidity();
     if (!isnan(t) && !isnan(h)) { lastTemp = t; lastHum = h; }
-    gasRaw = analogRead(GAS_PIN);
-    rainState = digitalRead(RAIN_PIN);
+    gasRaw = analogRead(GAS_PIN);      // GPIO34 (analog)
+    lightRaw = analogRead(LIGHT_PIN);  // GPIO33 (analog)
+    
+    // Rain detection
+    int newRainState = digitalRead(RAIN_PIN);  // GPIO17
+    if (newRainState != rainState) {
+      rainState = newRainState;
+      if (rainState == LOW) rainCoverOpen();
+      else rainCoverClose();
+    }
+    
+    // Auto Light Control for LED_AUTO_PIN (GPIO 2)
+    // Logic INVERTED: High analog > 3000 = Dark -> ON, Low < 1500 = Bright -> OFF
+    // Dedicated LED, no web control state needed
+    if (lightRaw > 3000) {
+      digitalWrite(LED_AUTO_PIN, HIGH);
+      // Serial.println("🌑 Dark -> Auto LED ON");
+    } else if (lightRaw < 1500) {
+      digitalWrite(LED_AUTO_PIN, LOW);
+      // Serial.println("☀️ Bright -> Auto LED OFF");
+    }
   }
 
-  // handle touch for screen switching (simple debounce, no delays)
+  // handle switches for LED toggles
+  
+  // SW1: TOUCH_PIN (GPIO 25) -> Now controls LED3 (Swap)
   bool touchNow = digitalRead(TOUCH_PIN) == HIGH;
-
   if (touchNow && !lastTouch) {
-    screenIndex = (screenIndex + 1) % 3;
-    // small debounce
-    delay(120);
+    led3State = !led3State;
+    digitalWrite(LED3_PIN, led3State ? HIGH : LOW);
+    Serial.printf("💡 LED3 toggled via Touch(25): %s\n", led3State ? "ON" : "OFF");
+    delay(150); // debounce
   }
   lastTouch = touchNow;
 
-  // update display periodically (keep original layout/time)
+  // SW2: SWITCH2_PIN (GPIO 33) -> Now controls LED2 (GPIO 26)
+  static bool lastSw2 = HIGH;
+  bool sw2Now = digitalRead(SWITCH2_PIN); 
+  if (sw2Now == LOW && lastSw2 == HIGH) { // Falling edge
+    led2State = !led2State;
+    digitalWrite(LED2_PIN, led2State ? HIGH : LOW);
+    Serial.printf("💡 LED2 toggled via Switch(33): %s\n", led2State ? "ON" : "OFF");
+    delay(150); // debounce
+  }
+  lastSw2 = sw2Now;
+
+  // SW3: SWITCH3_PIN (VN/GPIO 39) -> Controls LED1 (GPIO 32)
+  static bool lastSw3 = LOW;
+  bool sw3Now = digitalRead(SWITCH3_PIN) == HIGH; // TTP223 Active HIGH
+  if (sw3Now && !lastSw3) { // Rising edge
+    led1State = !led1State;
+    digitalWrite(LED1_PIN, led1State ? HIGH : LOW);
+    Serial.printf("💡 LED1 toggled via Switch(VN/39): %s\n", led1State ? "ON" : "OFF");
+    delay(150); // debounce
+  }
+  lastSw3 = sw3Now;
+
+  // update display periodically (always show main screen now)
   if (now - lastSensorDisplayMillis >= SENSOR_DISPLAY_INTERVAL) {
     lastSensorDisplayMillis = now;
-    switch (screenIndex) {
-      case 0: showMainScreen(); break;
-      case 1: showDHTScreen(); break;
-      case 2: showRainGasScreen(); break;
-    }
+    showMainScreen(); // Always main screen (no more switching)
   }
 
   // Servo state machine: OPENING -> OPEN -> auto-close only after SERVO_OPEN_MS from last valid access
@@ -675,7 +799,8 @@ void loop() {
         servoStateMillis = now;
       } else {
         // not open: attach & open
-        if (!myServo.attached()) myServo.attach(SERVO_PIN);
+        if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
+        if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
         delay(40); // allow servo to attach/stabilize
         servoTransition(SERVO_OPENING);
         // Log door open after RFID access

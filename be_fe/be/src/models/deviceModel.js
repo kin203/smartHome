@@ -17,6 +17,19 @@ const deviceSchema = mongoose.Schema(
             enum: ['Light', 'Fan', 'Sensor', 'Switch', 'Other', 'Servo', 'Buzzer'],
             default: 'Other',
         },
+        room: {
+            type: String,
+            default: 'Living Room',
+        },
+        channels: [{
+            index: Number,
+            name: String,
+            room: String,
+            status: {
+                type: String,
+                default: 'off'
+            }
+        }],
         status: {
             type: String,
             default: 'off',

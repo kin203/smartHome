@@ -59,6 +59,7 @@ const Dashboard = () => {
                         name: device.name,
                         type: 'Servo',
                         ip: device.ip,
+                        mac: device.mac,
                         status: 'off'
                     };
                     const createRes = await axios.post('/devices', newDevice);
@@ -103,6 +104,7 @@ const Dashboard = () => {
                     name: device.name,
                     type: 'Servo',
                     ip: device.ip,
+                    mac: device.mac,
                     status: 'off'
                 };
                 const createRes = await axios.post('/devices', newDevice);
@@ -128,6 +130,27 @@ const Dashboard = () => {
             setIsScanning(false);
         }
     };
+
+    // Helper to group devices by room
+    const groupedDevices = devices.reduce((acc, device) => {
+        const room = device.room || 'Khác';
+        if (!acc[room]) {
+            acc[room] = [];
+        }
+        acc[room].push(device);
+        return acc;
+    }, {});
+
+    // Ensure specific order: Living Room, Bedroom, Kitchen, Others
+    const roomOrder = ['Phòng Khách', 'Phòng Ngủ', 'Nhà Bếp', 'Khác'];
+    const sortedRooms = Object.keys(groupedDevices).sort((a, b) => {
+        const indexA = roomOrder.indexOf(a);
+        const indexB = roomOrder.indexOf(b);
+        if (indexA !== -1 && indexB !== -1) return indexA - indexB;
+        if (indexA !== -1) return -1;
+        if (indexB !== -1) return 1;
+        return a.localeCompare(b);
+    });
 
     return (
         <div className="min-h-screen bg-gray-50">
@@ -165,15 +188,15 @@ const Dashboard = () => {
                 <div className="flex justify-between items-center mb-8">
                     <div>
                         <h2 className="text-3xl font-bold text-gray-900">Dashboard</h2>
-                        <p className="text-gray-500 mt-1">Manage your connected devices</p>
+                        <p className="text-gray-500 mt-1">Manage your connected devices by room</p>
                     </div>
                     <div className="flex gap-3">
                         <button
                             onClick={handleScan}
                             disabled={isScanning || !isOnline}
                             className={`px-6 py-3 rounded-xl font-bold shadow-lg transition-all flex items-center gap-2 ${!isOnline
-                                    ? 'bg-gray-400 cursor-not-allowed text-white'
-                                    : 'bg-green-600 hover:bg-green-700 text-white shadow-green-500/30'
+                                ? 'bg-gray-400 cursor-not-allowed text-white'
+                                : 'bg-green-600 hover:bg-green-700 text-white shadow-green-500/30'
                                 }`}
                         >
                             {isScanning ? <span className="animate-spin">↻</span> : <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" /></svg>}
@@ -183,8 +206,8 @@ const Dashboard = () => {
                             onClick={() => setShowManualAdd(!showManualAdd)}
                             disabled={!isOnline}
                             className={`px-6 py-3 rounded-xl font-bold shadow-lg transition-all ${!isOnline
-                                    ? 'bg-gray-400 cursor-not-allowed text-white'
-                                    : 'bg-purple-600 hover:bg-purple-700 text-white shadow-purple-500/30'
+                                ? 'bg-gray-400 cursor-not-allowed text-white'
+                                : 'bg-purple-600 hover:bg-purple-700 text-white shadow-purple-500/30'
                                 }`}
                         >
                             Add by IP
@@ -193,8 +216,8 @@ const Dashboard = () => {
                             onClick={() => setIsModalOpen(true)}
                             disabled={!isOnline}
                             className={`px-6 py-3 rounded-xl font-bold shadow-lg transition-all flex items-center gap-2 ${!isOnline
-                                    ? 'bg-gray-400 cursor-not-allowed text-white'
-                                    : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/30'
+                                ? 'bg-gray-400 cursor-not-allowed text-white'
+                                : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/30'
                                 }`}
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" /></svg>
@@ -231,9 +254,35 @@ const Dashboard = () => {
                         <button onClick={() => setIsModalOpen(true)} className="text-blue-600 font-bold hover:text-blue-700">Add Device Now &rarr;</button>
                     </div>
                 ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                        {devices.map((device) => (
-                            <DeviceCard key={device._id} device={device} onDelete={handleDeleteDevice} onUpdate={handleUpdateDevice} onOpenDetail={setSelectedDevice} />
+                    <div className="space-y-10">
+                        {sortedRooms.map((room) => (
+                            <div key={room}>
+                                <div className="flex items-center gap-3 mb-4">
+                                    <div className={`p-2 rounded-lg ${room === 'Phòng Khách' ? 'bg-orange-100 text-orange-600' :
+                                        room === 'Phòng Ngủ' ? 'bg-indigo-100 text-indigo-600' :
+                                            room === 'Nhà Bếp' ? 'bg-red-100 text-red-600' :
+                                                'bg-gray-100 text-gray-600'
+                                        }`}>
+                                        {room === 'Phòng Khách' && <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" /></svg>}
+                                        {room === 'Phòng Ngủ' && <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>}
+                                        {room === 'Nhà Bếp' && <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.879 16.121A3 3 0 1012.015 11L11 14H9c0 .768.293 1.536.879 2.121z" /></svg>}
+                                        {(room !== 'Phòng Khách' && room !== 'Phòng Ngủ' && room !== 'Nhà Bếp') && <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>}
+                                    </div>
+                                    <h3 className="text-xl font-bold text-gray-800">{room}</h3>
+                                    <span className="bg-gray-100 text-gray-600 text-xs px-2 py-1 rounded-full font-medium">{groupedDevices[room].length} devices</span>
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                                    {groupedDevices[room].map((device) => (
+                                        <DeviceCard
+                                            key={device._id}
+                                            device={device}
+                                            onDelete={handleDeleteDevice}
+                                            onUpdate={handleUpdateDevice}
+                                            onOpenDetail={setSelectedDevice}
+                                        />
+                                    ))}
+                                </div>
+                            </div>
                         ))}
                     </div>
                 )}
