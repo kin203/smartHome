@@ -57,7 +57,20 @@ const DeviceDetailModal = ({ device, isOpen, onClose }) => {
                 <div className="flex justify-between items-center mb-6">
                     <h2 className="text-2xl font-bold text-gray-800">{device.name}</h2>
                     <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+                    <h2 className="text-2xl font-bold text-gray-800">{device.name}</h2>
+                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
                 </div>
+
+                {/* Critical Gas Alert Banner */}
+                {status && status.gasAlert && (
+                    <div className="mb-6 bg-red-600 text-white p-4 rounded-xl flex items-center gap-4 animate-pulse shadow-xl shadow-red-500/50">
+                        <div className="text-4xl">⚠️</div>
+                        <div className="flex-1">
+                            <h3 className="text-xl font-bold uppercase">Critical Gas Leak Detected!</h3>
+                            <p className="font-bold opacity-90">Gas Level: {status.gas} detected. Evacuate immediately!</p>
+                        </div>
+                    </div>
+                )}
 
                 {/* Tabs */}
                 <div className="flex gap-2 mb-6 border-b border-gray-200">
@@ -102,8 +115,8 @@ const DeviceDetailModal = ({ device, isOpen, onClose }) => {
                                             <div className="text-sm text-gray-500">Humidity</div>
                                         </div>
                                         <div className="bg-white rounded-lg p-4 text-center">
-                                            <div className="text-3xl mb-2">{status.gasAlert ? '⚠️' : '✅'}</div>
-                                            <div className={`text-2xl font-bold ${status.gasAlert ? 'text-red-600' : 'text-green-600'}`}>{status.gas}</div>
+                                            <div className="text-3xl mb-2">{status.gas > 800 ? '⚠️' : '✅'}</div>
+                                            <div className={`text-2xl font-bold ${status.gas > 800 ? 'text-red-600' : 'text-green-600'}`}>{status.gas}</div>
                                             <div className="text-sm text-gray-500">Gas Level</div>
                                         </div>
                                         <div className="bg-white rounded-lg p-4 text-center">

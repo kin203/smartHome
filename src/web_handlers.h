@@ -29,7 +29,7 @@ void handleStatus() {
   doc["temperature"] = isnan(lastTemp) ? 0 : lastTemp;
   doc["humidity"] = isnan(lastHum) ? 0 : lastHum;
   doc["gas"] = gasRaw;
-  doc["gasAlert"] = (gasRaw > 2000);
+  doc["gasAlert"] = (gasRaw > GAS_THRESHOLD);
   doc["rain"] = (rainState == LOW) ? "detected" : "none";
   
   // Actuator states

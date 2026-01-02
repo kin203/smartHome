@@ -96,8 +96,8 @@ const unsigned long SERVO_OPEN_MS = 5000; // keep open 5s
 // Rain cover servo (Giàn phơi)
 #define SERVO_RAIN_PIN 4   // GPIO 4
 Servo servoRain;
-const int RAIN_COVER_OPEN_US = 1500;   // 90 degrees (Rain detected)
-const int RAIN_COVER_CLOSED_US = 544;  // 0 degrees (No Rain)
+const int RAIN_COVER_OPEN_US = 544;    // 0 degrees (Reversed)
+const int RAIN_COVER_CLOSED_US = 1500; // 90 degrees (Reversed)
 bool rainCoverIsOpen = false;
 
 // ===== LEDs (điều khiển đèn) =====
@@ -143,6 +143,7 @@ unsigned long servoStateMillis = 0;
 float lastTemp = NAN;
 float lastHum = NAN;
 int gasRaw = 0;
+const int GAS_THRESHOLD = 800; // Threshold for gas alarm
 int rainState = HIGH;
 
 // Backend connection status
@@ -377,7 +378,7 @@ void showRainGasScreen() {
   display.setCursor(0, 20);
   display.printf("Rain: %s\n", rainState == LOW ? "Detected" : "None");
   display.setCursor(0, 35);
-  display.printf("Gas: %s", gasRaw > 2000 ? "ALERT!" : "Normal");
+  display.printf("Gas: %s", gasRaw > GAS_THRESHOLD ? "ALERT!" : "Normal");
   display.display();
 }
 void showUidScreen(const String &uidStr, bool ok) {
@@ -713,6 +714,16 @@ void loop() {
     } else if (lightRaw < 1500) {
       digitalWrite(LED_AUTO_PIN, LOW);
       // Serial.println("☀️ Bright -> Auto LED OFF");
+    }
+  
+    // Gas Alarm Logic
+    if (gasRaw > GAS_THRESHOLD) {
+      static unsigned long lastGasBeep = 0;
+      if (now - lastGasBeep > 500) { // Beep every 0.5 second
+        lastGasBeep = now;
+        Serial.printf("⚠️ GAS ALERT! Level: %d\n", gasRaw);
+        beep(false); // Alert beep (300ms)
+      }
     }
   }
 
