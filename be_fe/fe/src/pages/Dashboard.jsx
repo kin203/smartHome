@@ -9,9 +9,6 @@ import DeviceDetailModal from '../components/DeviceDetailModal';
 const Dashboard = () => {
     const [devices, setDevices] = useState([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
-    const [isScanning, setIsScanning] = useState(false);
-    const [showManualAdd, setShowManualAdd] = useState(false);
-    const [manualIP, setManualIP] = useState('');
     const [selectedDevice, setSelectedDevice] = useState(null);
     const { user, logout } = useContext(AuthContext);
     const { isOnline } = useBackendStatus();
@@ -43,92 +40,6 @@ const Dashboard = () => {
 
     const handleDeleteDevice = (deviceId) => {
         setDevices(devices.filter((device) => device._id !== deviceId));
-    };
-
-    const handleScan = async () => {
-        setIsScanning(true);
-        try {
-            const response = await axios.get('/scan');
-            const foundDevices = response.data;
-
-            if (foundDevices.length > 0) {
-                const device = foundDevices[0];
-                const deviceIp = device.ip || 'Unknown IP';
-                if (window.confirm(`Found device: ${device.name} (${deviceIp}). Add it?`)) {
-                    const newDevice = {
-                        name: device.name,
-                        type: 'Servo',
-                        ip: device.ip,
-                        mac: device.mac,
-                        status: 'off'
-                    };
-                    const createRes = await axios.post('/devices', newDevice);
-                    const createdDevice = createRes.data;
-
-                    // Set deviceId on ESP32 for access logging
-                    try {
-                        // Device ID is now handled by MAC address auto-registration
-                        // await axios.post(`http://${device.ip}/set-device-id`, { deviceId: createdDevice._id });
-                        console.log('Device ID set on ESP32');
-                    } catch (err) {
-                        console.warn('Failed to set device ID on ESP32:', err);
-                    }
-
-                    setDevices([...devices, createdDevice]);
-                }
-            } else {
-                alert('No devices found. Try adding by IP manually.');
-            }
-        } catch (error) {
-            console.error('Scan error:', error);
-            alert('Scan failed. Try adding by IP manually.');
-        } finally {
-            setIsScanning(false);
-        }
-    };
-
-    const handleManualAdd = async () => {
-        if (!manualIP) {
-            alert('Please enter an IP address');
-            return;
-        }
-
-        setIsScanning(true);
-        try {
-            const response = await axios.post('/scan/manual', { ip: manualIP });
-            const device = response.data;
-            const deviceIp = device.ip || 'Unknown IP';
-
-            if (window.confirm(`Found device: ${device.name} (${deviceIp}). Add it?`)) {
-                const newDevice = {
-                    name: device.name,
-                    type: 'Servo',
-                    ip: device.ip,
-                    mac: device.mac,
-                    status: 'off'
-                };
-                const createRes = await axios.post('/devices', newDevice);
-                const createdDevice = createRes.data;
-
-                // Set deviceId on ESP32 for access logging
-                try {
-                    // Device ID is now handled by MAC address auto-registration
-                    // await axios.post(`http://${device.ip}/set-device-id`, { deviceId: createdDevice._id });
-                    console.log('Device ID set on ESP32');
-                } catch (err) {
-                    console.warn('Failed to set device ID on ESP32:', err);
-                }
-
-                setDevices([...devices, createdDevice]);
-                setManualIP('');
-                setShowManualAdd(false);
-            }
-        } catch (error) {
-            console.error('Manual add error:', error);
-            alert('Failed to connect to device at this IP');
-        } finally {
-            setIsScanning(false);
-        }
     };
 
     // Helper to group devices by room
@@ -192,27 +103,6 @@ const Dashboard = () => {
                     </div>
                     <div className="flex gap-3">
                         <button
-                            onClick={handleScan}
-                            disabled={isScanning || !isOnline}
-                            className={`px-6 py-3 rounded-xl font-bold shadow-lg transition-all flex items-center gap-2 ${!isOnline
-                                ? 'bg-gray-400 cursor-not-allowed text-white'
-                                : 'bg-green-600 hover:bg-green-700 text-white shadow-green-500/30'
-                                }`}
-                        >
-                            {isScanning ? <span className="animate-spin">↻</span> : <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" /></svg>}
-                            {isScanning ? 'Scanning...' : 'Scan Network'}
-                        </button>
-                        <button
-                            onClick={() => setShowManualAdd(!showManualAdd)}
-                            disabled={!isOnline}
-                            className={`px-6 py-3 rounded-xl font-bold shadow-lg transition-all ${!isOnline
-                                ? 'bg-gray-400 cursor-not-allowed text-white'
-                                : 'bg-purple-600 hover:bg-purple-700 text-white shadow-purple-500/30'
-                                }`}
-                        >
-                            Add by IP
-                        </button>
-                        <button
                             onClick={() => setIsModalOpen(true)}
                             disabled={!isOnline}
                             className={`px-6 py-3 rounded-xl font-bold shadow-lg transition-all flex items-center gap-2 ${!isOnline
@@ -225,24 +115,6 @@ const Dashboard = () => {
                         </button>
                     </div>
                 </div>
-
-                {showManualAdd && (
-                    <div className="mb-6 bg-white p-6 rounded-xl shadow-md">
-                        <h3 className="text-lg font-bold mb-4">Add Device by IP Address</h3>
-                        <div className="flex gap-3">
-                            <input
-                                type="text"
-                                placeholder="e.g., 192.168.100.28"
-                                value={manualIP}
-                                onChange={(e) => setManualIP(e.target.value)}
-                                className="flex-1 px-4 py-3 rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none"
-                            />
-                            <button onClick={handleManualAdd} disabled={isScanning} className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-3 rounded-lg font-bold transition-all">
-                                {isScanning ? 'Connecting...' : 'Connect'}
-                            </button>
-                        </div>
-                    </div>
-                )}
 
                 {devices.length === 0 ? (
                     <div className="text-center py-20 bg-white rounded-3xl shadow-sm border border-gray-100">

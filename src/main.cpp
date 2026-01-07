@@ -47,7 +47,7 @@ const char* password = "12345678a@";
 // ===== Backend API =====
 const char* backendURL = "http://192.168.100.23:5000"; // Change to your PC's IP
 String deviceMac = ""; // Will be set from ESP32 MAC address
-const char* firmwareVersion = "1.0.2 fw-Stable"; // Firmware version
+const char* firmwareVersion = "1.0.3 screen_stable-hotfix"; // Firmware version
 bool deviceRegistered = false; // Flag to track registration status
 
 // ===== OLED =====
@@ -108,6 +108,8 @@ bool rainCoverIsOpen = false;
 bool led1State = false;  // Controlled by TOUCH_PIN (GPIO 25)
 bool led2State = false;  // Controlled by SWITCH2_PIN (GPIO 33)
 bool led3State = false;  // Controlled by SWITCH3_PIN (VN/39)
+bool isAutoMode = true;  // Default to Auto Mode
+bool autoLightState = false; // Current state of Auto Light (GPIO 2)
 
 // ===== Time & Weather =====
 WiFiUDP ntpUDP;
@@ -115,6 +117,7 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60000); // GMT+7
 String city = "Hanoi";
 String weatherMain = "--";
 String temperature = "--";
+String weatherHumidity = "--"; // Added for outdoor humidity
 String weatherIcon = "";
 unsigned long lastWeatherUpdate = 0;
 const unsigned long weatherUpdateInterval = 10 * 60 * 1000; // 10 minutes
@@ -154,7 +157,7 @@ int consecutiveFailures = 0;
 const int MAX_FAILURES_BEFORE_OFFLINE = 2;
 
 // UI & touch (touch now controls LED1, not screen switching)
-int screenIndex = 0; // Always show main screen
+int screenMode = 0; // 0=Auto, 1=Screen1, 2=Screen2
 bool lastTouch = LOW;
 int lightRaw = 0;    // Light sensor reading
 
@@ -297,102 +300,131 @@ void registerDeviceToBackend() {
   http.end();
 }
 
-// ===== Display functions (match original UI) =====
-void showMainScreen() {
+// ===== Display functions (Redesigned) =====
+int currentScreenId = 0;
+unsigned long lastScreenSwitch = 0;
+const unsigned long SCREEN_CYCLE_INTERVAL = 10000; // 10 seconds
+
+// TAB 1: General Info (WiFi, IP, Time, Outdoor Weather)
+void drawScreen1() {
   display.clearDisplay();
+  
+  // Header: WiFi & IP
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-
-  // ==== WiFi signal (4 bars) ====
-  int rssi = WiFi.RSSI();
-  int level = 0;
-  if (rssi > -50) level = 3;
-  else if (rssi > -70) level = 2;
-  else if (rssi > -85) level = 1;
-  else level = 0;
-
-  // Vẽ 4 vạch ở góc trái trên
-  for (int i = 0; i < 4; i++) {
-    int x = 2 + i * 6;
-    int h = (i + 1) * 3;            // chiều cao mỗi bar
-    int y = 12 - h;                 // căn trái phía trên
-    if (i <= level) display.fillRect(x, y, 4, h, SSD1306_WHITE);
-    else display.drawRect(x, y, 4, h, SSD1306_WHITE);
-  }
-
-  // ==== WiFi SSID + IP (bên phải vạch) ====
-  display.setCursor(30, 0);
-  display.printf("%s", WiFi.status() == WL_CONNECTED ? ssid : "No WiFi");
-  display.setCursor(30, 10);
-  display.printf("%s", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "No IP");
-
-  // ==== Server status warning ====
-  if (!backendOnline) {
-    display.setCursor(0, 20);
-    display.print("Server Offline");
+  display.setCursor(0, 0);
+  if (WiFi.status() == WL_CONNECTED) {
+    display.printf("WiFi: %s", ssid);
+    display.setCursor(0, 10);
+    display.printf("IP: %s", WiFi.localIP().toString().c_str());
   } else {
-    // ==== Weather + temp (giữ như trước) ====
-    display.setCursor(0, 25);
-    display.print(weatherIcon);
-    display.print(" ");
-    display.print(temperature);
-    display.print("C  ");
-    if (weatherMain.length() > 10) display.print(weatherMain.substring(0, 10));
-    else display.print(weatherMain);
+    display.println("WiFi: Disconnected");
   }
 
-  // ==== Time (giữ giữa dưới) ====
+  // Large Time
   display.setTextSize(2);
   String timeStr = timeClient.getFormattedTime();
+  // Center time
   int16_t x1, y1; uint16_t w, h;
   display.getTextBounds(timeStr, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 46);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 25);
   display.print(timeStr);
 
+  // Footer: Outdoor Weather
+  display.setTextSize(1);
+  display.setCursor(0, 50);
+  // Icon, Temp, Hum
+  display.printf("Out: %s %sC | %s%%", weatherIcon.c_str(), temperature.c_str(), weatherHumidity.c_str());
+  
+  // Page indicator (1/2)
+  display.drawRect(SCREEN_WIDTH-10, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE); // dot 1 active
+  display.fillRect(SCREEN_WIDTH-10, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE);
+  display.drawRect(SCREEN_WIDTH-5, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE); // dot 2 empty
+
   display.display();
 }
 
-
-void showDHTScreen() {
+// TAB 2: Home Status (Indoor Temp/Hum, 4 Lights)
+void drawScreen2() {
   display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("TEMP / HUMIDITY");
 
+  // Header: Indoor Environment
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("[ INDOOR STATUS ]");
+
+  // DHT Values
+  display.setCursor(0, 15);
   if (isnan(lastTemp) || isnan(lastHum)) {
-    display.setCursor(0, 20);
     display.println("Sensor Error!");
-    Serial.println("❌ Cannot read DHT22!");
   } else {
-    display.setCursor(0, 20);
-    display.printf("Temp: %.1f C\n", lastTemp);
-    display.printf("Humi: %.1f %%", lastHum);
+    display.printf("Temp: %.1fC  Hum: %.0f%%", lastTemp, lastHum);
   }
+
+  // Lights Status Grid
+  // L1  L2
+  // L3  Auto
+  int yBase = 35;
+  
+  // Light 1
+  display.setCursor(0, yBase);
+  display.printf("L1:%s", led1State ? "ON" : "OFF");
+  
+  // Light 2
+  display.setCursor(64, yBase);
+  display.printf("L2:%s", led2State ? "ON" : "OFF");
+
+  // Light 3
+  display.setCursor(0, yBase + 12);
+  display.printf("L3:%s", led3State ? "ON" : "OFF");
+
+  // Light Auto
+  display.setCursor(64, yBase + 12);
+  display.printf("Au:%s", autoLightState ? "ON" : "OFF");
+
+  // Page indicator (2/2)
+  display.drawRect(SCREEN_WIDTH-10, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE); // dot 1 empty
+  display.fillRect(SCREEN_WIDTH-5, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE);  // dot 2 active
+
   display.display();
 }
-void showRainGasScreen() {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("RAIN / GAS STATUS");
-  display.setCursor(0, 20);
-  display.printf("Rain: %s\n", rainState == LOW ? "Detected" : "None");
-  display.setCursor(0, 35);
-  display.printf("Gas: %s", gasRaw > GAS_THRESHOLD ? "ALERT!" : "Normal");
-  display.display();
+
+// Main Display Manager
+void showMainScreen() {
+  if (screenMode == 0) { // Auto Cycling
+    unsigned long now = millis();
+    if (now - lastScreenSwitch > SCREEN_CYCLE_INTERVAL) {
+      currentScreenId = (currentScreenId + 1) % 2;
+      lastScreenSwitch = now;
+    }
+    if (currentScreenId == 0) drawScreen1();
+    else drawScreen2();
+  } else if (screenMode == 1) { // Fixed Screen 1
+    drawScreen1();
+  } else if (screenMode == 2) { // Fixed Screen 2
+    drawScreen2();
+  }
 }
+
+void showDHTScreen() { /* kept for compatibility but effectively unused */ }
+void showRainGasScreen() { /* kept for compatibility */ }
+
 void showUidScreen(const String &uidStr, bool ok) {
+  // Override cycling to show RFID result for 3 seconds
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println("RFID");
+  display.println("RFID SCAN RESULT");
   display.setTextSize(2);
-  display.setCursor(0, 18);
+  display.setCursor(0, 20);
   display.println(uidStr);
   display.setTextSize(1);
-  display.setCursor(0, 52);
-  display.println(ok ? "Access: ALLOWED" : "Access: DENIED");
+  display.setCursor(0, 50);
+  display.println(ok ? "ACCESS GRANTED" : "ACCESS DENIED");
   display.display();
+  delay(2000); // Blocking delay to ensure visibility
+  lastScreenSwitch = millis(); // Reset cycle timer logic
 }
 
 // ===== Weather fetch (wttr.in) =====
@@ -412,6 +444,7 @@ void getWeather() {
       if (!error) {
         JsonObject current = doc["current_condition"][0].as<JsonObject>();
         temperature = String((const char*) current["temp_C"]);
+        weatherHumidity = String((const char*) current["humidity"]); // Parse humidity
         weatherMain = String((const char*) current["weatherDesc"][0]["value"]);
         String wm = weatherMain; wm.toLowerCase();
         if (wm.indexOf("rain") >= 0) weatherIcon = "R";
@@ -514,7 +547,6 @@ void drawProgress(int percent, const String &text = "") {
 #include "web_handlers.h"
 
 void setup() {
-
   Serial.begin(115200);
 
   pinMode(RAIN_PIN, INPUT);
@@ -547,11 +579,7 @@ void setup() {
   display.display();
 
   // Boot UI
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Booting system...");
-  display.display();
+  drawProgress(0, "Booting...");
   delay(200);
 
   // Get MAC address as unique device identifier
@@ -567,23 +595,21 @@ void setup() {
   Serial.printf("📱 Device MAC: %s\n", deviceMac.c_str());
   Serial.printf("ℹ️ Firmware Version: %s\n", firmwareVersion);
 
-  int progress = 0;
-  drawProgress(progress, "Init modules");
+  drawProgress(10, "Init modules");
   delay(300);
   // init sensors
   dht.begin();
-  progress = 10;
-
+  
   // WiFi connect
-  drawProgress(progress, "Connecting WiFi");
+  drawProgress(20, "Connecting WiFi");
   WiFi.begin(ssid, password);
   int timeout = 0;
   while (WiFi.status() != WL_CONNECTED && timeout < 30) {
     delay(500);
     timeout++;
-    progress = 10 + timeout * 2;
-    if (progress > 50) progress = 50;
-    drawProgress(progress, "Connecting WiFi");
+    int p = 20 + timeout * 2;
+    if (p > 50) p = 50;
+    drawProgress(p, "Connecting WiFi");
   }
   if (WiFi.status() == WL_CONNECTED) {
     drawProgress(50, "WiFi OK");
@@ -594,14 +620,11 @@ void setup() {
     Serial.println("⚠️ WiFi failed!");
   }
   delay(400);
-  drawProgress(70, "Time OK");
 
   // Weather
   drawProgress(75, "Loading weather");
   if (WiFi.status() == WL_CONNECTED) getWeather();
   delay(600);
-  drawProgress(100, "Done");
-  delay(300);
 
   // Auto-register device with backend
   if (WiFi.status() == WL_CONNECTED) {
@@ -612,6 +635,7 @@ void setup() {
     }
   }
 
+  drawProgress(100, "Done");
   display.clearDisplay();
   display.setCursor(25, 25);
   display.setTextSize(2);
@@ -660,14 +684,11 @@ void setup() {
   Serial.println("✅ HTTP server started");
 }
 
-
 // ===== Loop =====
 void loop() {
   server.handleClient();
   unsigned long now = millis();
 
-
-  // update NTP (non-blocking with interval check)
   // update NTP (non-blocking with interval check)
   static unsigned long lastNtpUpdate = 0;
   if (now - lastNtpUpdate >= 60000) { // Update every 60 seconds
@@ -707,13 +728,16 @@ void loop() {
     
     // Auto Light Control for LED_AUTO_PIN (GPIO 2)
     // Logic INVERTED: High analog > 3000 = Dark -> ON, Low < 1500 = Bright -> OFF
-    // Dedicated LED, no web control state needed
-    if (lightRaw > 3000) {
-      digitalWrite(LED_AUTO_PIN, HIGH);
-      // Serial.println("🌑 Dark -> Auto LED ON");
-    } else if (lightRaw < 1500) {
-      digitalWrite(LED_AUTO_PIN, LOW);
-      // Serial.println("☀️ Bright -> Auto LED OFF");
+    if (isAutoMode) {
+      if (lightRaw > 3000) {
+        autoLightState = true;
+      } else if (lightRaw < 1500) {
+        autoLightState = false;
+      }
+      digitalWrite(LED_AUTO_PIN, autoLightState ? HIGH : LOW);
+    } else {
+      // Manual Mode: autoLightState is set via API
+      digitalWrite(LED_AUTO_PIN, autoLightState ? HIGH : LOW);
     }
   
     // Gas Alarm Logic
@@ -761,11 +785,12 @@ void loop() {
   }
   lastSw3 = sw3Now;
 
-  // update display periodically (always show main screen now)
+  // Update display (cycling logic) - Throttled to 1s to avoid I2C flooding
   if (now - lastSensorDisplayMillis >= SENSOR_DISPLAY_INTERVAL) {
     lastSensorDisplayMillis = now;
-    showMainScreen(); // Always main screen (no more switching)
+    showMainScreen();
   }
+
 
   // Servo state machine: OPENING -> OPEN -> auto-close only after SERVO_OPEN_MS from last valid access
   if (servoState == SERVO_OPENING) {

@@ -42,7 +42,7 @@ void handleStatus() {
   }
   
   // Display info
-  doc["screen"] = screenIndex; // 0=main, 1=DHT, 2=Rain/Gas
+  doc["screenMode"] = screenMode; // 0=Auto, 1=Main, 2=DHT
   doc["wifi"] = WiFi.RSSI();
   doc["time"] = timeClient.getFormattedTime();
   
@@ -50,6 +50,8 @@ void handleStatus() {
   doc["relay1"] = led1State;
   doc["relay2"] = led2State;
   doc["relay3"] = led3State;
+  doc["autoMode"] = isAutoMode;
+  doc["autoLight"] = autoLightState;
   
   String response;
   serializeJson(doc, response);
@@ -112,12 +114,13 @@ void handleControl() {
       server.send(400, "application/json", "{\"error\":\"Invalid action. Use 'beep' or 'alert'\"}");
     }
   } else if (device == "screen" || device == "display") {
-    int screen = doc["value"] | 0;
-    if (screen >= 0 && screen <= 2) {
-      screenIndex = screen;
-      server.send(200, "application/json", "{\"status\":\"screen changed\"}");
+    int val = doc["value"] | 0;
+    if (val >= 0 && val <= 2) {
+      screenMode = val;
+      Serial.printf("🖥 Screen Mode: %d\n", screenMode);
+      server.send(200, "application/json", "{\"status\":\"screen mode changed\"}");
     } else {
-      server.send(400, "application/json", "{\"error\":\"Invalid screen. Use 0 (main), 1 (DHT), or 2 (Rain/Gas)\"}");
+      server.send(400, "application/json", "{\"error\":\"Invalid mode. Use 0 (Auto), 1 (Main), 2 (Indoor)\"}");
     }
   } else if (device == "relay" || device == "light") {
     int channel = doc["channel"]; // 1-4
@@ -146,6 +149,22 @@ void handleControl() {
     digitalWrite(pin, newState ? HIGH : LOW);
     Serial.printf("LED %d set to %s (GPIO %d = %s)\n", channel, newState ? "ON" : "OFF", pin, newState ? "HIGH" : "LOW");
     server.send(200, "application/json", "{\"status\":\"led updated\"}");
+  } else if (device == "auto_light") {
+    String act = doc["action"];
+    if (act == "set_mode") {
+      String val = doc["value"]; // "auto" or "manual"
+      isAutoMode = (val == "auto");
+      Serial.printf("🤖 Auto Light Mode: %s\n", isAutoMode ? "AUTO" : "MANUAL");
+    } else if (act == "turn") {
+      if (isAutoMode) {
+        server.send(400, "application/json", "{\"error\":\"Cannot manually control in Auto Mode\"}");
+        return;
+      }
+      String val = doc["value"]; // "on" or "off"
+      autoLightState = (val == "on");
+      Serial.printf("💡 Auto Light Manual Set: %s\n", autoLightState ? "ON" : "OFF");
+    }
+    server.send(200, "application/json", "{\"status\":\"success\"}");
   } else {
     server.send(400, "application/json", "{\"error\":\"Unknown device. Use 'door', 'buzzer', 'screen', or 'relay'\"}");
   }

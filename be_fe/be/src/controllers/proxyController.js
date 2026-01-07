@@ -26,7 +26,7 @@ const controlDevice = async (req, res) => {
             payload.channel = channel;
         }
 
-        const response = await axios.post(`http://${deviceDoc.ip}/control`, payload, { timeout: 2000 });
+        const response = await axios.post(`http://${deviceDoc.ip}/control`, payload, { timeout: 5000 });
 
         // Update device status in DB if successful
         if (response.status === 200) {
@@ -59,7 +59,7 @@ const getDeviceStatus = async (req, res) => {
             return res.status(400).json({ message: 'Device IP not configured' });
         }
 
-        const response = await axios.get(`http://${device.ip}/status`, { timeout: 3000 });
+        const response = await axios.get(`http://${device.ip}/status`, { timeout: 5000 });
         res.json(response.data);
     } catch (error) {
         console.error(`Status error for ${deviceId}:`, error.message);

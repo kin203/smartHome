@@ -124,19 +124,7 @@ const DeviceCard = ({ device, onDelete, onUpdate, onOpenDetail }) => {
                 </p>
             </div>
 
-            <div className="mt-6 flex justify-between items-center">
-                <span className={`text-sm font-medium ${!isOnline ? 'text-gray-500' : isOn ? 'text-blue-100' : 'text-gray-500'}`}>{isOn ? 'On' : 'Off'}</span>
-                <button
-                    onClick={(e) => { e.stopPropagation(); toggleStatus(); }}
-                    disabled={isLoading || !isOnline}
-                    className={`w-12 h-6 rounded-full p-1 transition-colors duration-300 ease-in-out ${!isOnline
-                        ? 'bg-gray-300 cursor-not-allowed'
-                        : isOn ? 'bg-white/30' : 'bg-gray-200'
-                        }`}
-                >
-                    <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform duration-300 ease-in-out ${isOn ? 'translate-x-6' : 'translate-x-0'}`} />
-                </button>
-            </div>
+
         </div>
     );
 };
