@@ -1,4 +1,5 @@
 import React, { useState, useEffect, createContext, useContext } from 'react';
+import axios from 'axios';
 import client from '../api/client';
 
 const BackendStatusContext = createContext();
@@ -8,17 +9,24 @@ export const BackendStatusProvider = ({ children }) => {
     const [lastCheck, setLastCheck] = useState(Date.now());
 
     useEffect(() => {
+        // Create a separate axios instance for status check (without /api suffix)
+        const baseUrl = client.defaults.baseURL.replace('/api', '');
+        const statusClient = axios.create({
+            baseURL: baseUrl,
+            timeout: 3000
+        });
+
         const checkBackendStatus = async () => {
             try {
-                // Try to ping a lightweight endpoint
-                await client.get('/devices', { timeout: 3000 });
+                // Hit root endpoint which doesn't require auth
+                await statusClient.get('/');
                 setIsOnline(true);
             } catch (error) {
-                // Check if we got a response (even if it's an error status like 401, 500)
-                // "Request failed with status code 401" means we DID reach the server.
-                if (error.response || (error.message && error.message.includes('status code'))) {
+                // If we got ANY response (even 404, 401, 500), backend is online
+                if (error.response) {
                     setIsOnline(true);
                 } else {
+                    // Network error (ECONNREFUSED, timeout) = backend offline
                     console.log('Backend offline:', error.message);
                     setIsOnline(false);
                 }
@@ -29,14 +37,14 @@ export const BackendStatusProvider = ({ children }) => {
         // Initial check
         checkBackendStatus();
 
-        // Check every 5 seconds
-        const interval = setInterval(checkBackendStatus, 5000);
+        // Check every 15 seconds
+        const interval = setInterval(checkBackendStatus, 15000);
 
         return () => clearInterval(interval);
     }, []);
 
     return (
-        <BackendStatusContext.Provider value={{ isOnline, lastCheck }}>
+        <BackendStatusContext.Provider value={{ isBackendOnline: isOnline, lastCheck }}>
             {children}
         </BackendStatusContext.Provider>
     );

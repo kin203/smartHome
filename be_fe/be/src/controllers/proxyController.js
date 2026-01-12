@@ -4,6 +4,11 @@ const Device = require('../models/deviceModel');
 // @desc    Control a device via proxy
 // @route   POST /api/control
 // @access  Private
+const { sendCommandToDevice } = require('../mqtt/mqttHandler');
+
+// @desc    Control a device via proxy (HTTP or MQTT)
+// @route   POST /api/control
+// @access  Private
 const controlDevice = async (req, res) => {
     const { deviceId, device, action, value, channel } = req.body;
 
@@ -11,10 +16,6 @@ const controlDevice = async (req, res) => {
         const deviceDoc = await Device.findById(deviceId);
         if (!deviceDoc) {
             return res.status(404).json({ message: 'Device not found' });
-        }
-
-        if (!deviceDoc.ip) {
-            return res.status(400).json({ message: 'Device IP not configured' });
         }
 
         // Construct payload for ESP32
@@ -26,19 +27,36 @@ const controlDevice = async (req, res) => {
             payload.channel = channel;
         }
 
-        const response = await axios.post(`http://${deviceDoc.ip}/control`, payload, { timeout: 5000 });
+        // --- NEW: MQTT Control ---
+        // We use MQTT by default for robust remote control.
+        // The ESP32 subscribes to 'cmd/<MAC_ADDRESS>'
+        if (deviceDoc.mac) {
+            const macCompact = deviceDoc.mac.replace(/:/g, '').toUpperCase(); // Ensure format matches ESP32 expectation
+            // Actually my firmware code uses colon-separated MAC in topics usually? 
+            // Let's check firmware code. Main.cpp uses `deviceMac` which has colons.
+            // So topic is `cmd/AA:BB:CC:DD:EE:FF`.
 
-        // Update device status in DB if successful
-        if (response.status === 200) {
-            if (device === 'door' || device === 'servo') {
+            sendCommandToDevice(deviceDoc.mac, payload);
+
+            // Optimistically update DB status for immediate UI feedback
+            if (device === 'door') {
                 deviceDoc.status = action === 'open' ? 'on' : 'off';
+                await deviceDoc.save();
             }
-            await deviceDoc.save();
+
+            return res.json({ success: true, message: 'Command sent via MQTT', payload });
         }
 
+        // Fallback to HTTP if no MAC (Legacy or Local-only fallback)
+        if (!deviceDoc.ip) {
+            return res.status(400).json({ message: 'Device IP/MAC not configured' });
+        }
+
+        const response = await axios.post(`http://${deviceDoc.ip}/control`, payload, { timeout: 3000 });
         res.json(response.data);
+
     } catch (error) {
-        console.error('Proxy error:', error.message);
+        console.error('Control error:', error.message);
         res.status(500).json({ message: 'Failed to communicate with device' });
     }
 };

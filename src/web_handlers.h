@@ -9,7 +9,7 @@ void setCORS() {
 
 void handleScan() {
   setCORS();
-  StaticJsonDocument<200> doc;
+  JsonDocument doc;
   doc["id"] = "esp32-smart-home";
   doc["name"] = "Smart Home Hub";
   doc["type"] = "Hub";
@@ -23,7 +23,7 @@ void handleScan() {
 
 void handleStatus() {
   setCORS();
-  StaticJsonDocument<512> doc;
+  JsonDocument doc;
   
   // Sensor data
   doc["temperature"] = isnan(lastTemp) ? 0 : lastTemp;
@@ -66,7 +66,7 @@ void handleControl() {
   }
   
   String body = server.arg("plain");
-  StaticJsonDocument<200> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, body);
   
   if (error) {

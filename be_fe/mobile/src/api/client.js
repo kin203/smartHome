@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 // Automatically detected LAN IP for better compatibility with physical devices
-const DEV_BACKEND_URL = 'http://192.168.100.23:5000/api';
+const DEV_BACKEND_URL = 'http://192.168.100.29:5000/api';
 
 const client = axios.create({
     baseURL: DEV_BACKEND_URL,

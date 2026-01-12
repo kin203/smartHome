@@ -14,7 +14,7 @@ const deviceSchema = mongoose.Schema(
         type: {
             type: String,
             required: [true, 'Please add a device type'],
-            enum: ['Light', 'Fan', 'Sensor', 'Switch', 'Other', 'Servo', 'Buzzer'],
+            enum: ['Light', 'Fan', 'Sensor', 'Switch', 'Other', 'Servo', 'Buzzer', 'Hub'],
             default: 'Other',
         },
         room: {

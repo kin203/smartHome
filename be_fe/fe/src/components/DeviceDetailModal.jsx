@@ -321,63 +321,7 @@ const DeviceDetailModal = ({ device, isOpen, onClose }) => {
                                             </div>
                                         </div>
 
-                                        {/* Channel Setup */}
-                                        {device.channels && device.channels.length > 0 && (
-                                            <div className="mb-8 p-6 bg-gray-50 rounded-xl border border-gray-200">
-                                                <h4 className="font-bold text-gray-700 mb-4 flex items-center gap-2">
-                                                    <span>🔌</span> Channels Mapping
-                                                </h4>
-                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                    {device.channels.map((channel, idx) => (
-                                                        <div key={idx} className="p-4 bg-white rounded-lg border border-gray-200 shadow-sm">
-                                                            <div className="font-bold text-xs text-gray-400 uppercase tracking-wider mb-2">Channel {channel.index}</div>
-                                                            <div className="space-y-3">
-                                                                <input
-                                                                    type="text"
-                                                                    defaultValue={channel.name}
-                                                                    id={`channel-name-${idx}`}
-                                                                    placeholder="Device Name"
-                                                                    className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                                                                />
-                                                                <select
-                                                                    defaultValue={channel.room || 'Living Room'}
-                                                                    id={`channel-room-${idx}`}
-                                                                    className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                                                                >
-                                                                    <option value="Phòng Khách">Phòng Khách</option>
-                                                                    <option value="Phòng Ngủ">Phòng Ngủ</option>
-                                                                    <option value="Nhà Bếp">Nhà Bếp</option>
-                                                                    <option value="Khác">Khác</option>
-                                                                </select>
-                                                            </div>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                                <div className="mt-4 flex justify-end">
-                                                    <button
-                                                        onClick={async () => {
-                                                            const updatedChannels = device.channels.map((ch, idx) => ({
-                                                                ...ch,
-                                                                name: document.getElementById(`channel-name-${idx}`).value,
-                                                                room: document.getElementById(`channel-room-${idx}`).value
-                                                            }));
 
-                                                            try {
-                                                                await axios.put(`/devices/${device._id}`, { channels: updatedChannels });
-                                                                alert('Channel settings saved!');
-                                                                window.location.reload();
-                                                            } catch (err) {
-                                                                console.error(err);
-                                                                alert('Failed to save channels');
-                                                            }
-                                                        }}
-                                                        className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition-colors text-sm shadow-md"
-                                                    >
-                                                        Save Mapping
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        )}
 
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                                             {/* Read-only Info */}
