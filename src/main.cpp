@@ -40,17 +40,20 @@
 
 WebServer server(80);
 Preferences preferences;
-WiFiClient espClient;
+WiFiClientSecure espClient; // Change to Secure Client for SSL
 PubSubClient mqttClient(espClient);
 // BLEProvisioning bleProvisioning;  // Disabled
 
 // Global Backend URL Buffer (Loaded from Flash)
-char backend_url[128] = "http://192.168.100.29:5000"; // Default
+// Global Backend URL Buffer (Loaded from Flash)
+char backend_url[128] = "https://smarthome-hpcn.onrender.com"; // Render Backend
 bool shouldSaveConfig = false;
 
-// MQTT Settings
-const char* mqtt_server = "192.168.100.29"; // Updated to user's PC IP
-const int mqtt_port = 1883;
+// MQTT Settings (HiveMQ Cloud)
+const char* mqtt_server = "678449c3ad964efd8f7099eb6f54a138.s1.eu.hivemq.cloud";
+const int mqtt_port = 8883; // SSL Port
+const char* mqtt_user = "nk203";
+const char* mqtt_pass = "Nk2032003@";
 
 // Callback notifying us of need to save config
 void saveConfigCallback () {
@@ -93,6 +96,7 @@ DHT dht(DHTPIN, DHTTYPE);
 #define LIGHT_PIN 34      // Cảm biến ánh sáng (analog) - chuyển từ 33
 #define GAS_PIN 35        // Cảm biến gas MQ2 (analog)
 #define TOUCH_PIN 25      // Touch button - toggle LED3 (GPIO 15)
+#define SWITCH2_PIN 33    // Switch 2 - toggle LED2 (GPIO 26)
 #define SWITCH3_PIN 39    // Switch 3 (VN) - toggle LED1 (GPIO 32)
 #define BUZZER_PIN 12
 #define BOOT_PIN 0        // Built-in BOOT button for factory reset
@@ -610,18 +614,15 @@ void reconnectMQTT() {
   String clientId = "ESP32Client-";
   clientId += String(random(0xffff), HEX);
   
-  String urlStr = String(backend_url);
-  int first = urlStr.indexOf("://") + 3;
-  int last = urlStr.indexOf(":", first);
-  if (last == -1) last = urlStr.length();
-  String host = urlStr.substring(first, last);
-  mqttClient.setServer(host.c_str(), 1883);
-
-  if (mqttClient.connect(clientId.c_str())) {
+  // Attempt to connect
+  if (mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
     Serial.println("connected");
-    String topic = "cmd/" + deviceMac;
-    mqttClient.subscribe(topic.c_str());
-    Serial.println("✅ Subscribed to: " + topic);
+    // Subscribe to ONE topic with wildcard for this device
+    String subTopic = "cmd/" + deviceMac;
+    mqttClient.subscribe(subTopic.c_str());
+    Serial.println("Subscribed to: " + subTopic);
+    
+    // Send Online Status immediately
   }
 }
 
@@ -748,8 +749,10 @@ void setup() {
     drawProgress(90, "Registering...");
     registerDeviceToBackend();
     
-    // Init MQTT - CRITICAL for remote control
-    mqttClient.setCallback(mqttCallback);
+    // MQTT Init
+  espClient.setInsecure(); // Skip certificate validation
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(mqttCallback);
     reconnectMQTT();
     
     if (!deviceRegistered) {
@@ -912,8 +915,7 @@ void loop() {
         beep(false); // Alert beep (300ms)
       }
     }
-  }
-
+    
   // handle switches for LED toggles
   
   // SW1: TOUCH_PIN (GPIO 25) -> Now controls LED3 (Swap)
