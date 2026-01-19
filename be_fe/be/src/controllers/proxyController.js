@@ -82,6 +82,8 @@ const getDeviceStatus = async (req, res) => {
             humidity: device.sensorData?.humidity,
             gas: device.sensorData?.gas,
             rain: device.sensorData?.rain,
+            autoLight: device.sensorData?.autoLight,
+            screenMode: device.sensorData?.screenMode,
             uptime: 9999,
             wifi: -50,
             ip: device.ip,

@@ -67,6 +67,8 @@ void saveConfigCallback () {
 #include <MFRC522.h>
 #include <ESP32Servo.h>
 
+unsigned long lastMqttPublish = 0; // Timer for MQTT report
+
 // ===== WiFi =====
 const char* ssid = "NK203";
 const char* password = "12345678a@";
@@ -267,6 +269,41 @@ bool isWhitelisted(String cardUID) {
 
   http.end();
   return authorized;
+}
+
+// Send Status via MQTT (Periodic)
+void sendMqttStatus() {
+  if (!mqttClient.connected()) return;
+
+  JsonDocument doc;
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+  
+  if (isnan(t)) t = 0;
+  if (isnan(h)) h = 0;
+
+  doc["temp"] = t;
+  doc["hum"] = h;
+  doc["gas"] = analogRead(GAS_PIN);
+  doc["rain"] = digitalRead(RAIN_PIN);
+  doc["light"] = analogRead(LIGHT_PIN);
+  doc["autoLight"] = isAutoMode;
+  doc["screen"] = screenMode;
+  
+  // Status logic
+  if (servoState == SERVO_CLOSED) doc["door"] = "closed";
+  else doc["door"] = "open";
+
+  doc["led1"] = led1State ? "on" : "off";
+  doc["led2"] = led2State ? "on" : "off";
+  doc["led3"] = led3State ? "on" : "off";
+
+  String payload;
+  serializeJson(doc, payload);
+  
+  String topic = "device/status/" + deviceMac;
+  mqttClient.publish(topic.c_str(), payload.c_str());
+  // Serial.println("📡 Status Sent: " + payload);
 }
 
 // Active Buzzer (Simple HIGH/LOW)
@@ -518,6 +555,7 @@ void servoTransition(ServoState newState) {
   if (servoState == newState) return;
   servoState = newState;
   servoStateMillis = millis();
+  sendMqttStatus(); // Immediate report
   switch (servoState) {
     case SERVO_OPENING:
       servoSetOpen();
@@ -559,9 +597,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String action = doc["action"];
 
   if (device == "buzzer") {
-    if (action == "beep") beep(false); // Alert beep for testing
-    else if (action == "alert") beep(false);
-  } else if (device == "door") {
+    // Handle Beep
+    if (action == "beep" || action == "alert") beep(false);
+  } 
+  
+  // LED / LIGHT / RELAY
+  else if (device == "door") {
     if (action == "open") {
       if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
       if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
@@ -571,9 +612,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     } else if (action == "close") {
       servoTransition(SERVO_CLOSING);
     }
-  } else if (device == "relay") {
+  } 
+  
+  else if (device == "relay" || device == "light") {
       int channel = doc["channel"];
-      bool newState = (action == "on");
+      // If channel is missing, maybe it's in value? or default to 1?
+      // Check if "value" is present for dimming? No, just on/off
+      bool newState = (action == "on" || action == "true");
+      
       int pin = -1;
       if(channel == 1) { led1State = newState; pin = LED1_PIN; }
       else if(channel == 2) { led2State = newState; pin = LED2_PIN; }
@@ -581,29 +627,45 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       
       if(pin != -1) {
           digitalWrite(pin, newState ? HIGH : LOW);
+          Serial.printf("💡 Light Ch%d: %s\n", channel, newState ? "ON" : "OFF");
       }
-  } else if (device == "auto_light") {
-      // Logic for Auto light mode control
+  } 
+  
+  else if (device == "auto_light") {
+      // Flexible logic
       String act = doc["action"];
-      if (act == "set_mode") {
-        String val = doc["value"]; // "auto" or "manual"
-        isAutoMode = (val == "auto");
-        Serial.printf("🤖 Auto Light Mode: %s\n", isAutoMode ? "AUTO" : "MANUAL");
-      } else if (act == "turn") {
-        if (!isAutoMode) {
-          String val = doc["value"]; // "on" or "off"
-          autoLightState = (val == "on");
-          digitalWrite(LED_AUTO_PIN, autoLightState ? HIGH : LOW);
-           Serial.printf("💡 Auto Light Manual Set: %s\n", autoLightState ? "ON" : "OFF");
-        }
+      String val = doc["value"];
+      
+      // Case 1: Standard Toggle (from simplified UI)
+      if (act == "on" || act == "true") {
+          isAutoMode = true; // Enable Auto Mode
+      } else if (act == "off" || act == "false") {
+          isAutoMode = false; // Disable Auto Mode (Manual)
+      } 
+      // Case 2: Explicit Mode Set
+      else if (act == "set_mode") {
+          isAutoMode = (val == "auto");
       }
-  } else if (device == "screen" || device == "display") {
+      // Case 3: Manual Control (Turn light on/off when in Manual)
+      else if (act == "turn" || act == "manual") {
+          // If Manual, allow control
+          if (!isAutoMode) {
+             bool state = (val == "on" || val == "true");
+             autoLightState = state;
+             digitalWrite(LED_AUTO_PIN, autoLightState ? HIGH : LOW);
+          }
+      }
+      Serial.printf("🤖 AutoMode: %s, Light: %s\n", isAutoMode?"ON":"OFF", autoLightState?"ON":"OFF");
+  } 
+  
+  else if (device == "screen" || device == "display") {
       int val = doc["value"] | 0;
       if (val >= 0 && val <= 2) {
         screenMode = val;
-         Serial.printf("🖥 Screen Mode: %d\n", screenMode);
       }
   }
+  
+  sendMqttStatus(); // Immediate report
 }
 
 // ===== MQTT Reconnect (Moved here) =====
@@ -825,6 +887,10 @@ void loop() {
           }
       } else {
           mqttClient.loop();
+          if (now - lastMqttPublish > 2000) { // Update every 2s
+            lastMqttPublish = now;
+            sendMqttStatus();
+          }
       }
   }
 
