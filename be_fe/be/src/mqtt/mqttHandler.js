@@ -58,6 +58,10 @@ const setupMQTT = () => {
                     updateFields.status = (data.door === "open" ? "on" : "off");
                 }
 
+                if (data.led1) updateFields['channels.0.status'] = (data.led1 === "on" ? "on" : "off");
+                if (data.led2) updateFields['channels.1.status'] = (data.led2 === "on" ? "on" : "off");
+                if (data.led3) updateFields['channels.2.status'] = (data.led3 === "on" ? "on" : "off");
+
                 // Update DB
                 await Device.findOneAndUpdate(
                     { mac: mac.toUpperCase() },
