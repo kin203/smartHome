@@ -85,6 +85,7 @@ const getDeviceStatus = async (req, res) => {
             rain: device.sensorData?.rain,
             autoLight: device.sensorData?.autoLight,
             screenMode: device.sensorData?.screenMode,
+            channels: device.channels, // Enable LED Status on UI
             uptime: 9999,
             wifi: -50,
             ip: device.ip,
