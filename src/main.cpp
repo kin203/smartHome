@@ -618,7 +618,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       int channel = doc["channel"];
       // If channel is missing, maybe it's in value? or default to 1?
       // Check if "value" is present for dimming? No, just on/off
-      bool newState = (action == "on" || action == "true");
+      String valStr = doc["value"];
+      bool valBool = doc["value"];
+      bool newState = (action == "on" || action == "true" || valStr == "on" || valBool == true);
       
       int pin = -1;
       if(channel == 1) { led1State = newState; pin = LED1_PIN; }

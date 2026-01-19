@@ -79,6 +79,7 @@ const getDeviceStatus = async (req, res) => {
             id: device.mac || 'unknown',
             door: device.status === 'on' ? 'open' : 'closed',
             temp: device.sensorData?.temp,
+            temperature: device.sensorData?.temp, // Alias for UI compatibility
             humidity: device.sensorData?.humidity,
             gas: device.sensorData?.gas,
             rain: device.sensorData?.rain,
