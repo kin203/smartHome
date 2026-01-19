@@ -49,6 +49,7 @@ const setupMQTT = () => {
                     'sensorData.rain': (data.rain === 0 ? "Rain" : "No"),
                     'sensorData.light': data.light,
                     'sensorData.autoLight': data.autoLight,
+                    'sensorData.autoMode': data.autoMode,
                     'sensorData.screenMode': data.screen,
                     'sensorData.lastUpdate': new Date()
                 };

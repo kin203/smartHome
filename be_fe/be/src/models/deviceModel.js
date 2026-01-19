@@ -60,7 +60,8 @@ const deviceSchema = mongoose.Schema(
             gas: Number,
             rain: String,
             light: Number,
-            autoLight: Boolean,
+            autoLight: Boolean, // Light State (On/Off)
+            autoMode: Boolean,  // Automation Mode (Enable/Disable)
             screenMode: Number,
             lastUpdate: Date
         }

@@ -84,6 +84,7 @@ const getDeviceStatus = async (req, res) => {
             gas: device.sensorData?.gas,
             rain: device.sensorData?.rain,
             autoLight: device.sensorData?.autoLight,
+            autoMode: device.sensorData?.autoMode,
             screenMode: device.sensorData?.screenMode,
             channels: device.channels,
             // Map channels to relayX for Frontend compatibility

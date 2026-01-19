@@ -287,7 +287,8 @@ void sendMqttStatus() {
   doc["gas"] = analogRead(GAS_PIN);
   doc["rain"] = digitalRead(RAIN_PIN);
   doc["light"] = analogRead(LIGHT_PIN);
-  doc["autoLight"] = isAutoMode;
+  doc["autoMode"] = isAutoMode;      // Chế độ Auto (True/False)
+  doc["autoLight"] = autoLightState; // Trạng thái Đèn (On/Off)
   doc["screen"] = screenMode;
   
   // Status logic
