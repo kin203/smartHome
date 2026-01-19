@@ -54,6 +54,16 @@ const deviceSchema = mongoose.Schema(
         ip: {
             type: String,
         },
+        sensorData: {
+            temp: Number,
+            humidity: Number,
+            gas: Number,
+            rain: String,
+            light: Number,
+            autoLight: Boolean,
+            screenMode: Number,
+            lastUpdate: Date
+        }
     },
     {
         timestamps: true,

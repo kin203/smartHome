@@ -1,4 +1,5 @@
 const mqtt = require('mqtt');
+const Device = require('../models/deviceModel');
 
 // HiveMQ Cloud Credentials
 const MQTT_HOST = '678449c3ad964efd8f7099eb6f54a138.s1.eu.hivemq.cloud';
@@ -33,9 +34,41 @@ const setupMQTT = () => {
         console.error('❌ MQTT Connection Error:', err);
     });
 
-    client.on('message', (topic, message) => {
-        // console.log(`MSG on ${topic}: ${message.toString()}`);
-        // Handle incoming status logic if needed (e.g. update DB online status)
+    client.on('message', async (topic, message) => {
+        // Handle incoming status logic
+        if (topic.startsWith('device/status/')) {
+            const mac = topic.split('/').pop();
+            try {
+                const data = JSON.parse(message.toString());
+
+                // Map Firmware JSON to DB Schema
+                const updateFields = {
+                    'sensorData.temp': data.temp,
+                    'sensorData.humidity': data.hum,
+                    'sensorData.gas': data.gas,
+                    'sensorData.rain': (data.rain === 0 ? "Rain" : "No"),
+                    'sensorData.light': data.light,
+                    'sensorData.autoLight': data.autoLight,
+                    'sensorData.screenMode': data.screen,
+                    'sensorData.lastUpdate': new Date()
+                };
+
+                // Update Status (Door/Led)
+                if (data.door) {
+                    updateFields.status = (data.door === "open" ? "on" : "off");
+                }
+
+                // Update DB
+                await Device.findOneAndUpdate(
+                    { mac: mac.toUpperCase() },
+                    { $set: updateFields }
+                );
+                // console.log(`✅ Updated DB for ${mac}`);
+
+            } catch (e) {
+                console.error('Failed to parse MQTT payload:', e.message);
+            }
+        }
     });
 };
 

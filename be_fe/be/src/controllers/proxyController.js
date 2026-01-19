@@ -78,6 +78,10 @@ const getDeviceStatus = async (req, res) => {
         res.json({
             id: device.mac || 'unknown',
             door: device.status === 'on' ? 'open' : 'closed',
+            temp: device.sensorData?.temp,
+            humidity: device.sensorData?.humidity,
+            gas: device.sensorData?.gas,
+            rain: device.sensorData?.rain,
             uptime: 9999,
             wifi: -50,
             ip: device.ip,
