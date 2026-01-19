@@ -1,9 +1,23 @@
-/* Home IoT - Firmware with WiFi Provisioning & MQTT Remote Control
-   - WiFiManager for SoftAP configuration (SSID: SmartHome-Setup)
-   - MQTT for Remote Command handling (Topic: cmd/DEVICE_MAC)
-   - Sensors: DHT22, Rain, MQ2, Light, Touch
-   - Actuators: Servos, Lights, Buzzer, OLED
-   - Logic: RFID, Web Server, Auto Light, Rain Cover
+/* Home IoT - Final firmware
+   - UI & boot sequence like your original sketch (WiFi, NTP, weather, boot progress)
+   - Sensors: DHT22(27), Rain(17), MQ2 ADC(34), Light Sensor(33), Touch TP223(25)
+   - OLED I2C SDA=23, SCL=22 (display layout same as original)
+   - RFID MFRC522 on custom SPI pins (SS=5,RST=21,SCK=18,MISO=19,MOSI=13)
+   - Buzzer = 12
+   - Servos: 
+     * Gate Right Wing SG90 = 16 (5V separate supply; GND common)
+     * Gate Left Wing SG90 = 14 (5V separate supply; GND common)
+     * Rain Cover SG90 = 4 (auto-opens 90° when rain detected)
+   - Lights (controlled via MOSFET/Relay):
+     * LED1 = 32 (via MOSFET A3400 gate, init LOW on boot)
+     * LED2 = 15
+     * LED3 = 22
+   - Behavior:
+     * RFID valid -> open servo; keep door open for 5000 ms after the *last* valid scan
+     * repeatDelay between accepted scans = 2000 ms
+     * if scanned again during open period, reset timer (extend open)
+     * Rain detected -> rain cover opens 90° clockwise automatically
+     * Touch button -> toggle LED1 on/off
 */
 
 #include <Arduino.h>
@@ -16,12 +30,33 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <WebServer.h>
-#include <WiFiManager.h> // WiFi Configuration Portal
-#include <PubSubClient.h> // MQTT Client
+
+#include <WebServer.h>
+#include <WiFiManager.h>
+#include <Preferences.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h> // Re-added for MQTT
+// #include "ble_provisioning.h"  // Disabled: WiFiManager only
 
 WebServer server(80);
+Preferences preferences;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
+// BLEProvisioning bleProvisioning;  // Disabled
+
+// Global Backend URL Buffer (Loaded from Flash)
+char backend_url[128] = "http://192.168.100.29:5000"; // Default
+bool shouldSaveConfig = false;
+
+// MQTT Settings
+const char* mqtt_server = "192.168.100.29"; // Updated to user's PC IP
+const int mqtt_port = 1883;
+
+// Callback notifying us of need to save config
+void saveConfigCallback () {
+  Serial.println("Should save config");
+  shouldSaveConfig = true;
+}
 
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
@@ -29,18 +64,16 @@ PubSubClient mqttClient(espClient);
 #include <MFRC522.h>
 #include <ESP32Servo.h>
 
-// ===== CONFIGURATION =====
-char backendIP[40] = "192.168.100.23"; // Default Backend IP, configurable via WiFiManager
-char backendPort[6] = "5000";          // Default Backend HTTP Port
+// ===== WiFi =====
+const char* ssid = "NK203";
+const char* password = "12345678a@";
 
-// Backend URLs constructed dynamically
-String apiBaseURL; 
-String mqttServer;
-const int mqttPort = 1883;
-
-String deviceMac = ""; // Set from ESP32 MAC
-const char* firmwareVersion = "2.0.1 complete_refactor"; 
-bool deviceRegistered = false; 
+// ===== Backend API =====
+// ===== Backend API =====
+// backend_url is now dynamic
+String deviceMac = ""; // Will be set from ESP32 MAC address
+const char* firmwareVersion = "1.5.0 wifi-manager"; // Firmware version
+bool deviceRegistered = false; // Flag to track registration status
 
 // ===== OLED =====
 #define SCREEN_WIDTH 128
@@ -51,20 +84,20 @@ bool deviceRegistered = false;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // ===== DHT22 =====
-#define DHTPIN 27 
+#define DHTPIN 27         // DHT22 temperature & humidity sensor
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
 // ===== Sensors / pins =====
-#define RAIN_PIN 17       
-#define LIGHT_PIN 34      
-#define GAS_PIN 35        
-#define TOUCH_PIN 25      
-#define SWITCH2_PIN 33    
-#define SWITCH3_PIN 39    
+#define RAIN_PIN 17       // Cảm biến mưa (digital)
+#define LIGHT_PIN 34      // Cảm biến ánh sáng (analog) - chuyển từ 33
+#define GAS_PIN 35        // Cảm biến gas MQ2 (analog)
+#define TOUCH_PIN 25      // Touch button - toggle LED3 (GPIO 15)
+#define SWITCH3_PIN 39    // Switch 3 (VN) - toggle LED1 (GPIO 32)
 #define BUZZER_PIN 12
+#define BOOT_PIN 0        // Built-in BOOT button for factory reset
 
-// ===== RFID =====
+// ===== RFID SPI pins (no conflict) =====
 #define RST_PIN 21
 #define SS_PIN 5
 #define SCK_PIN 18
@@ -73,130 +106,105 @@ DHT dht(DHTPIN, DHTTYPE);
 MFRC522 mfrc(SS_PIN, RST_PIN);
 
 // ===== Servo =====
-#define SERVO_RIGHT_PIN 16  
-#define SERVO_LEFT_PIN 14   
+// Gate servos (2 wings) - SWAPPED pins
+#define SERVO_RIGHT_PIN 16  // Right gate wing (updated)
+#define SERVO_LEFT_PIN 14   // Left gate wing (updated)
 Servo servoRight;
 Servo servoLeft;
-const int SERVO_RIGHT_OPEN_US = 1800;   
-const int SERVO_RIGHT_CLOSED_US = 1000; 
-const int SERVO_LEFT_OPEN_US = 1000;    
-const int SERVO_LEFT_CLOSED_US = 1800;  
-const unsigned long SERVO_OPEN_MS = 5000; 
+// Servo directions (cửa phải đảo ngược)
+const int SERVO_RIGHT_OPEN_US = 1800;   // Cửa phải: đảo ngược (open)
+const int SERVO_RIGHT_CLOSED_US = 1000; // Cửa phải: đảo ngược (closed)
+const int SERVO_LEFT_OPEN_US = 1000;    // Cửa trái: bình thường (open)
+const int SERVO_LEFT_CLOSED_US = 1800;  // Cửa trái: bình thường (closed)
+const unsigned long SERVO_OPEN_MS = 5000; // keep open 5s
 
-#define SERVO_RAIN_PIN 4   
+// Rain cover servo (Giàn phơi)
+#define SERVO_RAIN_PIN 4   // GPIO 4
 Servo servoRain;
-const int RAIN_COVER_OPEN_US = 544;    
-const int RAIN_COVER_CLOSED_US = 1500; 
+const int RAIN_COVER_OPEN_US = 544;    // 0 degrees (Reversed)
+const int RAIN_COVER_CLOSED_US = 1500; // 90 degrees (Reversed)
 bool rainCoverIsOpen = false;
 
-// ===== LEDs =====
-#define LED1_PIN 32    
-#define LED2_PIN 26    
-#define LED3_PIN 15    
-#define LED_AUTO_PIN 2 
-bool led1State = false;  
-bool led2State = false;  
-bool led3State = false;  
-bool isAutoMode = true;  
-bool autoLightState = false; 
+// ===== LEDs (điều khiển đèn) =====
+#define LED1_PIN 32    // LED 1 - qua MOSFET A3400 gate
+#define LED2_PIN 26    // LED 2
+#define LED3_PIN 15    // LED 3
+#define LED_AUTO_PIN 2 // LED Auto (Light Sensor control)
+bool led1State = false;  // Controlled by TOUCH_PIN (GPIO 25)
+bool led2State = false;  // Controlled by SWITCH2_PIN (GPIO 33)
+bool led3State = false;  // Controlled by SWITCH3_PIN (VN/39)
+bool isAutoMode = true;  // Default to Auto Mode
+bool autoLightState = false; // Current state of Auto Light (GPIO 2)
 
-// ===== Time & Weather =====
+// ===== Time =====
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60000); 
-String city = "Hanoi";
-String weatherMain = "--";
-String temperature = "--";
-String weatherHumidity = "--"; 
-String weatherIcon = "";
-unsigned long lastWeatherUpdate = 0;
-const unsigned long weatherUpdateInterval = 10 * 60 * 1000; 
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60000); // GMT+7
+// Weather API removed to eliminate blocking HTTPS calls
 
-// ===== State Variables =====
+// ===== Whitelist (4-byte UID) =====
+const uint8_t whitelist[][4] = {
+  {0xB1, 0xD7, 0x7F, 0x05}
+};
+const size_t whitelistCount = sizeof(whitelist) / sizeof(whitelist[0]);
+
+// ===== Timers & state =====
 unsigned long lastDhtMillis = 0;
 const unsigned long DHT_INTERVAL = 2000;
 unsigned long lastSensorDisplayMillis = 0;
 const unsigned long SENSOR_DISPLAY_INTERVAL = 1000;
-unsigned long lastReadMillis = 0;
-const unsigned long repeatDelay = 2000; 
 
+unsigned long lastReadMillis = 0;
+const unsigned long repeatDelay = 2000; // 2s between accepted RFID reads
+
+// Servo state machine
 enum ServoState { SERVO_CLOSED, SERVO_OPENING, SERVO_OPEN, SERVO_CLOSING };
 ServoState servoState = SERVO_CLOSED;
 unsigned long servoStateMillis = 0;
 
+// Sensor values
 float lastTemp = NAN;
 float lastHum = NAN;
 int gasRaw = 0;
-const int GAS_THRESHOLD = 800; 
+const int GAS_THRESHOLD = 800; // Threshold for gas alarm
 int rainState = HIGH;
 
+// Backend connection status
 bool backendOnline = true;
+unsigned long lastBackendCheck = 0;
+const unsigned long BACKEND_CHECK_INTERVAL = 5000; // Check every 5s
 int consecutiveFailures = 0;
 const int MAX_FAILURES_BEFORE_OFFLINE = 2;
 
-int screenMode = 0; 
+// UI & touch (touch now controls LED1, not screen switching)
+int screenMode = 0; // 0=Auto, 1=Screen1, 2=Screen2
 bool lastTouch = LOW;
-int lightRaw = 0; 
+int lightRaw = 0;    // Light sensor reading
 
-// Touch sampling
+// Touch sampling to increase sensitivity (TP223)
 const int TOUCH_SAMPLES = 8;
 const int TOUCH_THRESHOLD = 2;
 const unsigned long TOUCH_SAMPLE_INTERVAL_MS = 6;
 
-// ===== Helper Functions Declarations =====
-String hexByte(uint8_t b);
-void beep(bool ok);
-void registerDeviceToBackend();
-void sendAccessLog(String cardUID, bool accessGranted);
-bool isWhitelisted(String cardUID);
+// Display State for non-blocking UI
+bool showingResult = false;
+unsigned long resultStartMillis = 0;
+const unsigned long RESULT_DISPLAY_DURATION = 2000;
+unsigned long lastButtonPress = 0; // Global debounce timer
 
-// ===== Helper Functions =====
+// ===== Helpers =====
 String hexByte(uint8_t b) {
   String s = String(b, HEX);
   if (s.length() == 1) s = "0" + s;
   s.toUpperCase();
   return s;
 }
-
-void beep(bool ok) {
-  pinMode(BUZZER_PIN, OUTPUT);
-  if (ok) {
-    digitalWrite(BUZZER_PIN, HIGH); delay(80); digitalWrite(BUZZER_PIN, LOW); delay(80);
-    digitalWrite(BUZZER_PIN, HIGH); delay(80); digitalWrite(BUZZER_PIN, LOW);
-  } else {
-    digitalWrite(BUZZER_PIN, HIGH); delay(300); digitalWrite(BUZZER_PIN, LOW);
+String uidToString(MFRC522::Uid &uid) {
+  String s = "";
+  for (byte i = 0; i < uid.size; i++) {
+    if (i) s += ":";
+    s += hexByte(uid.uidByte[i]);
   }
-  pinMode(BUZZER_PIN, INPUT);
-}
-
-// Function to register device (extracted for retry logic)
-void registerDeviceToBackend() {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  HTTPClient http;
-  String url = apiBaseURL + "/api/devices/register";
-  http.begin(url);
-  http.setTimeout(5000); // 5 second timeout
-  http.addHeader("Content-Type", "application/json");
-
-  JsonDocument doc;
-  doc["mac"] = deviceMac;
-  doc["ip"] = WiFi.localIP().toString();
-  doc["name"] = "ESP32-" + deviceMac.substring(deviceMac.length() - 8);
-  doc["firmwareVersion"] = firmwareVersion;
-
-  String jsonBody;
-  serializeJson(doc, jsonBody);
-
-  int httpCode = http.POST(jsonBody);
-  if (httpCode > 0) {
-    Serial.printf("✅ Device registered successfully: %d\n", httpCode);
-    deviceRegistered = true;
-    backendOnline = true;
-  } else {
-    Serial.printf("⚠️ Device registration failed: %s (Code: %d)\n", http.errorToString(httpCode).c_str(), httpCode);
-    backendOnline = false;
-  }
-  http.end();
+  return s;
 }
 
 // Check card authorization via backend API
@@ -207,12 +215,25 @@ bool isWhitelisted(String cardUID) {
     return false;
   }
 
-  HTTPClient http;
-  String url = apiBaseURL + "/api/rfid-cards/check";
-  http.begin(url);
-  http.setTimeout(3000); 
-  http.addHeader("Content-Type", "application/json");
+  WiFiClient* clientPtr;
+  WiFiClientSecure secureClient;
+  WiFiClient localClient;
+  
+  String urlStr = String(backend_url);
+  if (urlStr.startsWith("https")) {
+     secureClient.setInsecure();
+     clientPtr = &secureClient;
+  } else {
+     clientPtr = &localClient;
+  }
 
+  HTTPClient http;
+  String url = urlStr + "/api/rfid-cards/check";
+  // http.begin(*clientPtr, url); // For newer ESP32 cores
+  http.begin(url); // Auto handles protocol in newer HTTPClient, but let's verify
+  
+  http.setTimeout(2000); // Reduced timeout to 2s
+  http.addHeader("Content-Type", "application/json");
   JsonDocument doc;
   doc["deviceMac"] = deviceMac;
   doc["cardUID"] = cardUID;
@@ -244,6 +265,17 @@ bool isWhitelisted(String cardUID) {
   return authorized;
 }
 
+// Active Buzzer (Simple HIGH/LOW)
+void beep(bool ok) {
+  pinMode(BUZZER_PIN, OUTPUT);
+  if (ok) {
+    digitalWrite(BUZZER_PIN, HIGH); delay(100); digitalWrite(BUZZER_PIN, LOW); delay(50);
+    digitalWrite(BUZZER_PIN, HIGH); delay(100); digitalWrite(BUZZER_PIN, LOW);
+  } else {
+    digitalWrite(BUZZER_PIN, HIGH); delay(500); digitalWrite(BUZZER_PIN, LOW);
+  }
+}
+
 // Send access log to backend
 void sendAccessLog(String cardUID, bool accessGranted) {
   if (WiFi.status() != WL_CONNECTED || deviceMac.length() == 0) {
@@ -252,15 +284,15 @@ void sendAccessLog(String cardUID, bool accessGranted) {
   }
 
   HTTPClient http;
-  String url = apiBaseURL + "/api/access-logs";
+  String url = String(backend_url) + "/api/access-logs";
   http.begin(url);
-  http.setTimeout(3000); 
+  http.setTimeout(2000); // Reduced timeout to 2s
   http.addHeader("Content-Type", "application/json");
-
   JsonDocument doc;
   doc["deviceMac"] = deviceMac;
   doc["cardUID"] = cardUID;
   doc["accessGranted"] = accessGranted;
+  // Backend will auto-generate timestamp with Date.now()
 
   String jsonBody;
   serializeJson(doc, jsonBody);
@@ -274,88 +306,91 @@ void sendAccessLog(String cardUID, bool accessGranted) {
   http.end();
 }
 
-// ===== Servo Logic =====
-void servoSetOpen() {
-  if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
-  if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
-  servoRight.writeMicroseconds(SERVO_RIGHT_OPEN_US);  
-  servoLeft.writeMicroseconds(SERVO_LEFT_OPEN_US);    
-  Serial.printf("🚪 Gate OPEN\n");
-}
-void servoSetClose() {
-  if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
-  if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
-  servoRight.writeMicroseconds(SERVO_RIGHT_CLOSED_US);  
-  servoLeft.writeMicroseconds(SERVO_LEFT_CLOSED_US);    
-  Serial.printf("🚪 Gate CLOSE\n");
-}
+// Function to register device (extracted for retry logic)
+void registerDeviceToBackend() {
+  if (WiFi.status() != WL_CONNECTED) return;
 
-void rainCoverOpen() {
-  if (!servoRain.attached()) servoRain.attach(SERVO_RAIN_PIN);
-  servoRain.writeMicroseconds(RAIN_COVER_OPEN_US);
-  rainCoverIsOpen = true;
-  Serial.println("☂️ Rain cover opened");
-}
-void rainCoverClose() {
-  if (!servoRain.attached()) servoRain.attach(SERVO_RAIN_PIN);
-  servoRain.writeMicroseconds(RAIN_COVER_CLOSED_US);
-  rainCoverIsOpen = false;
-  Serial.println("☂️ Rain cover closed");
-}
+  HTTPClient http;
+  String url = String(backend_url) + "/api/devices/register";
+  http.begin(url);
+  http.setTimeout(2000); // 2 second timeout
+  http.addHeader("Content-Type", "application/json");
 
-void servoTransition(ServoState newState) {
-  if (servoState == newState) return;
-  servoState = newState;
-  servoStateMillis = millis();
-  switch (servoState) {
-    case SERVO_OPENING: servoSetOpen(); break;
-    case SERVO_CLOSING: servoSetClose(); break;
-    case SERVO_CLOSED:
-      if (servoRight.attached()) servoRight.detach();
-      if (servoLeft.attached()) servoLeft.detach();
-      break;
-    default: break;
+  StaticJsonDocument<256> doc;
+  doc["mac"] = deviceMac;
+  doc["ip"] = WiFi.localIP().toString();
+  doc["name"] = "ESP32-" + deviceMac.substring(deviceMac.length() - 8);
+  doc["firmwareVersion"] = firmwareVersion;
+
+  String jsonBody;
+  serializeJson(doc, jsonBody);
+
+  int httpCode = http.POST(jsonBody);
+  if (httpCode > 0) {
+    Serial.printf("✅ Device registered successfully: %d\n", httpCode);
+    deviceRegistered = true;
+    backendOnline = true;
+  } else {
+    Serial.printf("⚠️ Device registration failed: %s (Code: %d)\n", http.errorToString(httpCode).c_str(), httpCode);
+    backendOnline = false;
   }
+  http.end();
 }
 
-// ===== Display Logic =====
+// ===== Display functions (Redesigned) =====
 int currentScreenId = 0;
 unsigned long lastScreenSwitch = 0;
+const unsigned long SCREEN_CYCLE_INTERVAL = 10000; // 10 seconds
 
+// TAB 1: General Info (WiFi, IP, Time, Outdoor Weather)
 void drawScreen1() {
   display.clearDisplay();
+  
+  // Header: WiFi & IP
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   if (WiFi.status() == WL_CONNECTED) {
-    display.printf("WiFi: %s", WiFi.SSID().c_str());
+    display.printf("WiFi: %s", ssid);
     display.setCursor(0, 10);
     display.printf("IP: %s", WiFi.localIP().toString().c_str());
   } else {
     display.println("WiFi: Disconnected");
   }
 
+  // Large Time
   display.setTextSize(2);
   String timeStr = timeClient.getFormattedTime();
+  // Center time
   int16_t x1, y1; uint16_t w, h;
   display.getTextBounds(timeStr, 0, 0, &x1, &y1, &w, &h);
   display.setCursor((SCREEN_WIDTH - w) / 2, 25);
   display.print(timeStr);
 
+  // Footer: WiFi Status (weather removed)
   display.setTextSize(1);
   display.setCursor(0, 50);
-  display.printf("Out: %s %sC | %s%%", weatherIcon.c_str(), temperature.c_str(), weatherHumidity.c_str());
+  display.printf("WiFi: %s", WiFi.status() == WL_CONNECTED ? "OK" : "ERR");
   
+  // Page indicator (1/2)
+  display.drawRect(SCREEN_WIDTH-10, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE); // dot 1 active
+  display.fillRect(SCREEN_WIDTH-10, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE);
+  display.drawRect(SCREEN_WIDTH-5, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE); // dot 2 empty
+
   display.display();
 }
 
+// TAB 2: Home Status (Indoor Temp/Hum, 4 Lights)
 void drawScreen2() {
   display.clearDisplay();
+
+  // Header: Indoor Environment
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   display.println("[ INDOOR STATUS ]");
 
+  // DHT Values
   display.setCursor(0, 15);
   if (isnan(lastTemp) || isnan(lastHum)) {
     display.println("Sensor Error!");
@@ -363,28 +398,56 @@ void drawScreen2() {
     display.printf("Temp: %.1fC  Hum: %.0f%%", lastTemp, lastHum);
   }
 
+  // Lights Status Grid
+  // L1  L2
+  // L3  Auto
   int yBase = 35;
-  display.setCursor(0, yBase); display.printf("L1:%s", led1State ? "ON" : "OFF");
-  display.setCursor(64, yBase); display.printf("L2:%s", led2State ? "ON" : "OFF");
-  display.setCursor(0, yBase + 12); display.printf("L3:%s", led3State ? "ON" : "OFF");
-  display.setCursor(64, yBase + 12); display.printf("Au:%s", autoLightState ? "ON" : "OFF");
+  
+  // Light 1
+  display.setCursor(0, yBase);
+  display.printf("L1:%s", led1State ? "ON" : "OFF");
+  
+  // Light 2
+  display.setCursor(64, yBase);
+  display.printf("L2:%s", led2State ? "ON" : "OFF");
+
+  // Light 3
+  display.setCursor(0, yBase + 12);
+  display.printf("L3:%s", led3State ? "ON" : "OFF");
+
+  // Light Auto
+  display.setCursor(64, yBase + 12);
+  display.printf("Au:%s", autoLightState ? "ON" : "OFF");
+
+  // Page indicator (2/2)
+  display.drawRect(SCREEN_WIDTH-10, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE); // dot 1 empty
+  display.fillRect(SCREEN_WIDTH-5, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE);  // dot 2 active
 
   display.display();
 }
 
+// Main Display Manager
 void showMainScreen() {
-  if (screenMode == 0) { 
+  if (screenMode == 0) { // Auto Cycling
     unsigned long now = millis();
-    if (now - lastScreenSwitch > 10000) {
+    if (now - lastScreenSwitch > SCREEN_CYCLE_INTERVAL) {
       currentScreenId = (currentScreenId + 1) % 2;
       lastScreenSwitch = now;
     }
-    if (currentScreenId == 0) drawScreen1(); else drawScreen2();
-  } else if (screenMode == 1) drawScreen1();
-  else if (screenMode == 2) drawScreen2();
+    if (currentScreenId == 0) drawScreen1();
+    else drawScreen2();
+  } else if (screenMode == 1) { // Fixed Screen 1
+    drawScreen1();
+  } else if (screenMode == 2) { // Fixed Screen 2
+    drawScreen2();
+  }
 }
 
+void showDHTScreen() { /* kept for compatibility but effectively unused */ }
+void showRainGasScreen() { /* kept for compatibility */ }
+
 void showUidScreen(const String &uidStr, bool ok) {
+  // Override cycling to show RFID result for 3 seconds
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
@@ -396,365 +459,577 @@ void showUidScreen(const String &uidStr, bool ok) {
   display.setCursor(0, 50);
   display.println(ok ? "ACCESS GRANTED" : "ACCESS DENIED");
   display.display();
-  delay(2000); 
-  lastScreenSwitch = millis(); 
+  
+  // Non-blocking timer
+  showingResult = true;
+  resultStartMillis = millis();
 }
 
-// ===== Weather fetch (wttr.in) =====
-void getWeather() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  String url = "https://wttr.in/" + city + "?format=j1";
-  http.setTimeout(5000);
-  if (http.begin(client, url)) {
-    int httpCode = http.GET();
-    if (httpCode == 200) {
-      String payload = http.getString();
-      JsonDocument doc;
-      DeserializationError error = deserializeJson(doc, payload);
-      if (!error) {
-        JsonObject current = doc["current_condition"][0].as<JsonObject>();
-        temperature = String((const char*) current["temp_C"]);
-        weatherHumidity = String((const char*) current["humidity"]); 
-        weatherMain = String((const char*) current["weatherDesc"][0]["value"]);
-        String wm = weatherMain; wm.toLowerCase();
-        if (wm.indexOf("rain") >= 0) weatherIcon = "R";
-        else if (wm.indexOf("thunder") >= 0) weatherIcon = "T";
-        else if (wm.indexOf("cloud") >= 0) weatherIcon = "C";
-        else if (wm.indexOf("sun") >= 0 || wm.indexOf("clear") >= 0) weatherIcon = "S";
-        else weatherIcon = "-";
-      }
-    }
-    http.end();
+// ===== MQTT Callback =====
+// MQTT functions moved below servoTransition to fix scope error
+// Weather API removed - was causing 2-5s blocking on HTTPS calls
+
+// ===== Touch increased sensitivity (sampling) =====
+bool sampleTouchHigh() {
+  int countHigh = 0;
+  for (int i = 0; i < TOUCH_SAMPLES; ++i) {
+    if (digitalRead(TOUCH_PIN) == HIGH) countHigh++;
+    delay(TOUCH_SAMPLE_INTERVAL_MS / TOUCH_SAMPLES);
   }
-  lastWeatherUpdate = millis();
+  return (countHigh >= TOUCH_THRESHOLD);
 }
 
-// ===== MQTT Logic =====
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  String message;
-  for (int i = 0; i < length; i++) message += (char)payload[i];
-  Serial.printf("📥 MQTT Message [%s]: %s\n", topic, message.c_str());
+// ===== Servo state machine helpers =====
+void servoSetOpen() {
+  if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
+  if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
+  servoRight.writeMicroseconds(SERVO_RIGHT_OPEN_US);  // Cửa phải
+  servoLeft.writeMicroseconds(SERVO_LEFT_OPEN_US);    // Cửa trái
+  Serial.printf("🚪 Gate OPEN: Right=%dus, Left=%dus\n", SERVO_RIGHT_OPEN_US, SERVO_LEFT_OPEN_US);
+}
+void servoSetClose() {
+  if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
+  if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
+  servoRight.writeMicroseconds(SERVO_RIGHT_CLOSED_US);  // Cửa phải
+  servoLeft.writeMicroseconds(SERVO_LEFT_CLOSED_US);    // Cửa trái
+  Serial.printf("🚪 Gate CLOSE: Right=%dus, Left=%dus\n", SERVO_RIGHT_CLOSED_US, SERVO_LEFT_CLOSED_US);
+}
 
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, message);
+// Rain cover servo control
+void rainCoverOpen() {
+  if (!servoRain.attached()) servoRain.attach(SERVO_RAIN_PIN);
+  servoRain.writeMicroseconds(RAIN_COVER_OPEN_US);
+  rainCoverIsOpen = true;
+  Serial.println("☂️ Rain cover opened (90°)");
+}
+void rainCoverClose() {
+  if (!servoRain.attached()) servoRain.attach(SERVO_RAIN_PIN);
+  servoRain.writeMicroseconds(RAIN_COVER_CLOSED_US);
+  rainCoverIsOpen = false;
+  Serial.println("☂️ Rain cover closed (0°)");
+}
+
+// transition handler (non-blocking state machine uses servoState & servoStateMillis)
+void servoTransition(ServoState newState) {
+  if (servoState == newState) return;
+  servoState = newState;
+  servoStateMillis = millis();
+  switch (servoState) {
+    case SERVO_OPENING:
+      servoSetOpen();
+      break;
+    case SERVO_OPEN:
+      // holding; timer managed in loop
+      break;
+    case SERVO_CLOSING:
+      servoSetClose();
+      break;
+    case SERVO_CLOSED:
+      // detach to reduce jitter and idle current
+      if (servoRight.attached()) servoRight.detach();
+      if (servoLeft.attached()) servoLeft.detach();
+      break;
+  }
+}
+
+// ===== MQTT Callback (Moved here) =====
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("📡 MQTT Msg ["); Serial.print(topic); Serial.print("] ");
+  
+  String msg = "";
+  for (unsigned int i = 0; i < length; i++) {
+    msg += (char)payload[i];
+  }
+  Serial.println(msg);
+
+  JsonDocument doc; // Fixed: Use JsonDocument instead of StaticJsonDocument
+  DeserializationError error = deserializeJson(doc, msg);
+
   if (error) {
-    Serial.println("❌ JSON parse failed");
+    Serial.print("❌ MQTT JSON Error: ");
+    Serial.println(error.c_str());
     return;
   }
 
   String device = doc["device"];
   String action = doc["action"];
 
-  // Handle Commands
-  if (device == "door") {
+  if (device == "buzzer") {
+    if (action == "beep") beep(false); // Alert beep for testing
+    else if (action == "alert") beep(false);
+  } else if (device == "door") {
     if (action == "open") {
+      if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
+      if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
+      delay(40);
       servoTransition(SERVO_OPENING);
-      beep(true);
+      sendAccessLog("DOOR_OPEN_REMOTE", true);
     } else if (action == "close") {
       servoTransition(SERVO_CLOSING);
     }
-  } 
-  else if (device == "relay") {
-    int ch = doc["channel"];
-    String val = doc["action"]; 
-    bool state = (val == "on");
-    if (ch == 1) { led1State = state; digitalWrite(LED1_PIN, state ? HIGH : LOW); }
-    else if (ch == 2) { led2State = state; digitalWrite(LED2_PIN, state ? HIGH : LOW); }
-    else if (ch == 3) { led3State = state; digitalWrite(LED3_PIN, state ? HIGH : LOW); }
-  }
-  else if (device == "buzzer") {
-    if (action == "beep") beep(true);
-    else if (action == "alert") beep(false);
-  }
-  else if (device == "screen") {
-    screenMode = doc["value"];
-    showMainScreen();
-  }
-  else if (device == "auto_light") {
-     String mode = doc["value"]; // auto, manual
-     if (action == "set_mode") {
-        isAutoMode = (mode == "auto");
-     }
+  } else if (device == "relay") {
+      int channel = doc["channel"];
+      bool newState = (action == "on");
+      int pin = -1;
+      if(channel == 1) { led1State = newState; pin = LED1_PIN; }
+      else if(channel == 2) { led2State = newState; pin = LED2_PIN; }
+      else if(channel == 3) { led3State = newState; pin = LED3_PIN; }
+      
+      if(pin != -1) {
+          digitalWrite(pin, newState ? HIGH : LOW);
+      }
+  } else if (device == "auto_light") {
+      // Logic for Auto light mode control
+      String act = doc["action"];
+      if (act == "set_mode") {
+        String val = doc["value"]; // "auto" or "manual"
+        isAutoMode = (val == "auto");
+        Serial.printf("🤖 Auto Light Mode: %s\n", isAutoMode ? "AUTO" : "MANUAL");
+      } else if (act == "turn") {
+        if (!isAutoMode) {
+          String val = doc["value"]; // "on" or "off"
+          autoLightState = (val == "on");
+          digitalWrite(LED_AUTO_PIN, autoLightState ? HIGH : LOW);
+           Serial.printf("💡 Auto Light Manual Set: %s\n", autoLightState ? "ON" : "OFF");
+        }
+      }
+  } else if (device == "screen" || device == "display") {
+      int val = doc["value"] | 0;
+      if (val >= 0 && val <= 2) {
+        screenMode = val;
+         Serial.printf("🖥 Screen Mode: %d\n", screenMode);
+      }
   }
 }
 
+// ===== MQTT Reconnect (Moved here) =====
 void reconnectMQTT() {
-  if (WiFi.status() == WL_CONNECTED && !mqttClient.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    String clientId = "ESP32Client-" + deviceMac;
-    
-    if (mqttClient.connect(clientId.c_str())) {
-      Serial.println("connected");
-      String topic = "cmd/" + deviceMac;
-      mqttClient.subscribe(topic.c_str());
-      String statusTopic = "device/status/" + deviceMac;
-      mqttClient.publish(statusTopic.c_str(), "online");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" try again in 5 seconds");
-    }
+  if (mqttClient.connected()) return;
+  
+  Serial.print("📡 Connecting to MQTT...");
+  String clientId = "ESP32Client-";
+  clientId += String(random(0xffff), HEX);
+  
+  String urlStr = String(backend_url);
+  int first = urlStr.indexOf("://") + 3;
+  int last = urlStr.indexOf(":", first);
+  if (last == -1) last = urlStr.length();
+  String host = urlStr.substring(first, last);
+  mqttClient.setServer(host.c_str(), 1883);
+
+  if (mqttClient.connect(clientId.c_str())) {
+    Serial.println("connected");
+    String topic = "cmd/" + deviceMac;
+    mqttClient.subscribe(topic.c_str());
+    Serial.println("✅ Subscribed to: " + topic);
   }
 }
 
-// ===== HTTP Handlers (Included AFTER helper definitions) =====
-#include "web_handlers.h" 
+// ===== Setup (boot progress like original) =====
+void drawProgress(int percent, const String &text = "") {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Booting system...");
+  display.drawRect(10, 25, 108, 10, SSD1306_WHITE);
+  display.fillRect(10, 25, percent * 108 / 100, 10, SSD1306_WHITE);
+  display.setCursor(10, 40);
+  display.printf("%3d%% %s", percent, text.c_str());
+  display.display();
+}
 
-// ===== Setup & Loop =====
+#include <Update.h>
+#include "web_handlers.h"
+
 void setup() {
   Serial.begin(115200);
 
-  // Pin Modes
   pinMode(RAIN_PIN, INPUT);
-  pinMode(TOUCH_PIN, INPUT);           
-  pinMode(SWITCH2_PIN, INPUT_PULLUP);  
-  pinMode(SWITCH3_PIN, INPUT);        
-  pinMode(BUZZER_PIN, INPUT);
+  pinMode(TOUCH_PIN, INPUT);           // TTP223 Touch: Active HIGH (GPIO 25)
+  pinMode(SWITCH2_PIN, INPUT_PULLUP);  // Mechanical Switch: Active LOW (GPIO 33)
+  pinMode(SWITCH3_PIN, INPUT);         // TTP223 Touch: Active HIGH (GPIO 39/VN) - No Resistor needed
+  pinMode(SWITCH3_PIN, INPUT);         // TTP223 Touch: Active HIGH (GPIO 39/VN) - No Resistor needed
+  pinMode(BUZZER_PIN, OUTPUT);         // Critical Fix: Must be OUTPUT
+  digitalWrite(BUZZER_PIN, LOW);       // Ensure buzzer off at boot
+  pinMode(BOOT_PIN, INPUT_PULLUP);     // Init Boot button
   
-  pinMode(LED1_PIN, OUTPUT); digitalWrite(LED1_PIN, LOW); 
-  pinMode(LED2_PIN, OUTPUT); digitalWrite(LED2_PIN, LOW);
-  pinMode(LED3_PIN, OUTPUT); digitalWrite(LED3_PIN, LOW);
-  pinMode(LED_AUTO_PIN, OUTPUT); digitalWrite(LED_AUTO_PIN, LOW);
+  // Init LED pins (3 LEDs total)
+  pinMode(LED1_PIN, OUTPUT);
+  digitalWrite(LED1_PIN, LOW);  // CRITICAL: Set LOW immediately for MOSFET safety
+  pinMode(LED2_PIN, OUTPUT);
+  digitalWrite(LED2_PIN, LOW);
+  pinMode(LED3_PIN, OUTPUT);
+  digitalWrite(LED3_PIN, LOW);
+  pinMode(LED_AUTO_PIN, OUTPUT);
+  digitalWrite(LED_AUTO_PIN, LOW);
+  
+  led1State = false;
+  led2State = false;
+  led3State = false;
 
-  // OLED Init
+  // OLED with fast I2C
   Wire.begin(OLED_SDA, OLED_SCL);
+  Wire.setClock(400000); // 400kHz Fast Mode - reduces display lag
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("❌ OLED not found");
-    while(true);
+    Serial.println("❌ OLED not found!");
+    while (true);
   }
   display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(10, 20);
-  display.println("Booting...");
   display.display();
 
-  // Get MAC
+  // Boot UI
+  drawProgress(0, "Booting...");
+  delay(200);
+
+  // Get MAC address as unique device identifier
   uint8_t mac[6];
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
-  for (int i=0; i<6; i++) {
-    if (i>0) deviceMac += ":";
-    if (mac[i]<0x10) deviceMac += "0";
+  deviceMac = "";
+  for (int i = 0; i < 6; i++) {
+    if (i > 0) deviceMac += ":";
+    if (mac[i] < 0x10) deviceMac += "0"; // Add leading zero for single-digit hex
     deviceMac += String(mac[i], HEX);
   }
   deviceMac.toUpperCase();
-  Serial.println("MAC: " + deviceMac);
+  Serial.printf("📱 Device MAC: %s\n", deviceMac.c_str());
+  Serial.printf("ℹ️ Firmware Version: %s\n", firmwareVersion);
 
-  // WiFiManager
-  WiFiManager wifiManager;
-  // Custom Parameter for Backend IP
-  WiFiManagerParameter custom_backend_ip("backend", "Backend IP", backendIP, 40);
-  wifiManager.addParameter(&custom_backend_ip);
+  drawProgress(10, "Init modules");
+  delay(300);
+  // init sensors
+  dht.begin();
   
-  display.clearDisplay();
-  display.setCursor(0,0);
-  display.println("Connect to WiFi:");
-  display.println("SmartHome-Setup");
-  display.display();
-
-  if (!wifiManager.autoConnect("SmartHome-Setup")) {
-    ESP.restart();
+  // Load backend URL from preferences
+  preferences.begin("smarthome", false);
+  String savedUrl = preferences.getString("backend_url", "");
+  if (savedUrl.length() > 0) {
+    savedUrl.toCharArray(backend_url, 128);
+    Serial.println("Loaded Backend URL: " + savedUrl);
+  }
+  
+  // WiFiManager Setup
+  WiFiManager wm;
+  wm.setSaveConfigCallback(saveConfigCallback);
+  
+  // Custom param for backend URL
+  WiFiManagerParameter custom_backend_url("backend", "Backend URL", backend_url, 128);
+  wm.addParameter(&custom_backend_url);
+  
+  drawProgress(20, "Connect WiFi...");
+  
+  // AutoConnect (starts AP if fail)
+  if (!wm.autoConnect("SmartHome-Setup")) {
+     Serial.println("failed to connect and hit timeout");
+     delay(1000);
+     ESP.restart();
   }
 
-  // Save custom params
-  strcpy(backendIP, custom_backend_ip.getValue());
-  apiBaseURL = "http://" + String(backendIP) + ":" + String(backendPort);
-  mqttServer = String(backendIP);
+  // Save updated config if changed
+  if (shouldSaveConfig) {
+      strcpy(backend_url, custom_backend_url.getValue());
+      preferences.putString("backend_url", backend_url);
+      Serial.println("Saved Backend URL: " + String(backend_url));
+  }
+  preferences.end();
 
-  Serial.println("✅ WiFi Connected");
-  Serial.println("Backend: " + apiBaseURL);
-  
-  // MQTT Init
-  mqttClient.setServer(mqttServer.c_str(), mqttPort);
-  mqttClient.setCallback(mqttCallback);
+  if (WiFi.status() == WL_CONNECTED) {
+    drawProgress(50, "WiFi OK");
+    Serial.println("✅ WiFi connected! " + WiFi.localIP().toString());
+  } else {
+    drawProgress(50, "WiFi FAIL");
+  }
+  delay(400);
 
-  // REST Init
+  // Weather removed - was causing lag
+
+  // Auto-register device with backend
+  if (WiFi.status() == WL_CONNECTED) {
+    drawProgress(90, "Registering...");
+    registerDeviceToBackend();
+    
+    // Init MQTT - CRITICAL for remote control
+    mqttClient.setCallback(mqttCallback);
+    reconnectMQTT();
+    
+    if (!deviceRegistered) {
+      Serial.println("⚠️ Initial registration failed, will retry in loop");
+    }
+  }
+
+  drawProgress(100, "Done");
+  display.clearDisplay();
+  display.setCursor(25, 25);
+  display.setTextSize(2);
+  display.println("READY!");
+  display.display();
+  delay(700);
+
+  // RFID init
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
+  mfrc.PCD_Init();
+  Serial.println("✅ MFRC522 ready.");
+
+  // Servo: do NOT attach at setup (avoid brownout)
+  servoState = SERVO_CLOSED;
+
+  // show main
+  showMainScreen();
+  lastDhtMillis = 0;
+  lastSensorDisplayMillis = 0;
+  // lastWeatherUpdate removed with weather code
+
+
+  // Web Server
   server.on("/scan", HTTP_GET, handleScan);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/control", HTTP_POST, handleControl);
+
+  // OTA Updates
   server.on("/update", HTTP_GET, handleOTA);
   server.on("/update", HTTP_POST, []() {
     server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
     delay(1000);
     ESP.restart();
   }, handleOTAUpload);
-  server.begin();
-
-  // Hardware Init
-  dht.begin();
-  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
-  mfrc.PCD_Init();
   
-  // Weather & Register
-  timeClient.begin();
-  // registerDeviceToBackend(); // Only calls once, will retry in loop
+  // CORS preflight handler for OPTIONS requests
+  server.onNotFound([](){
+    if (server.method() == HTTP_OPTIONS) {
+      setCORS();
+      server.send(200, "text/plain", "");
+    } else {
+      server.send(404, "application/json", "{\"error\":\"Not found\"}");
+    }
+  });
+  
+  server.begin();
+  Serial.println("✅ HTTP server started");
 }
 
-String uidToString(MFRC522::Uid &uid) {
-  String s = "";
-  for (byte i = 0; i < uid.size; i++) {
-    if (i) s += ":";
-    s += hexByte(uid.uidByte[i]);
-  }
-  return s;
-}
-
+// ===== Loop =====
 void loop() {
   server.handleClient();
-  
-  // MQTT & NTP Maintenance
+  unsigned long now = millis();
+
+  // MQTT Loop - CRITICAL for receiving commands
   if (WiFi.status() == WL_CONNECTED) {
-    if (!mqttClient.connected()) {
-      static unsigned long lastMqttRetry = 0;
-      if (millis() - lastMqttRetry > 5000) {
-        lastMqttRetry = millis();
-        reconnectMQTT();
+      if (!mqttClient.connected()) {
+          static unsigned long lastMqttRetry = 0;
+          if (millis() - lastMqttRetry > 5000) {
+              lastMqttRetry = millis();
+              reconnectMQTT();
+          }
+      } else {
+          mqttClient.loop();
       }
-    } else {
-      mqttClient.loop();
-    }
-    timeClient.update();
   }
 
-  unsigned long now = millis();
-  
-  // Retry Registration
+  // update NTP (non-blocking with interval check)
+  static unsigned long lastNtpUpdate = 0;
+  if (now - lastNtpUpdate >= 60000) { // Update every 60 seconds
+    timeClient.update();
+    lastNtpUpdate = now;
+  }
+
+  // Retry registration if not yet registered (every 15 seconds)
   static unsigned long lastRegRetry = 0;
   if (!deviceRegistered && WiFi.status() == WL_CONNECTED && (now - lastRegRetry > 15000)) {
+    Serial.println("🔄 Retrying device registration...");
     registerDeviceToBackend();
     lastRegRetry = now;
   }
 
-  // Weather polling
-  if (WiFi.status() == WL_CONNECTED && (now - lastWeatherUpdate > weatherUpdateInterval)) {
-    getWeather();
-  }
+  // Weather API removed
+  // if (WiFi.status() == WL_CONNECTED && (now - lastWeatherUpdate > weatherUpdateInterval)) {
+  //   getWeather();
+  // }
 
-  // Sensor Loop
+  // read sensors periodically
   if (now - lastDhtMillis >= DHT_INTERVAL) {
     lastDhtMillis = now;
     float t = dht.readTemperature();
     float h = dht.readHumidity();
-    if (!isnan(t)) lastTemp = t; 
-    if (!isnan(h)) lastHum = h;
+    if (!isnan(t) && !isnan(h)) { lastTemp = t; lastHum = h; }
+    gasRaw = analogRead(GAS_PIN);      // GPIO34 (analog)
+    lightRaw = analogRead(LIGHT_PIN);  // GPIO33 (analog)
     
-    gasRaw = analogRead(GAS_PIN);
-    lightRaw = analogRead(LIGHT_PIN);
-    
-    int newRainState = digitalRead(RAIN_PIN);
+    // Rain detection
+    int newRainState = digitalRead(RAIN_PIN);  // GPIO17
     if (newRainState != rainState) {
-        rainState = newRainState;
-        if (rainState == LOW) rainCoverOpen(); else rainCoverClose();
-    }
-
-    if (isAutoMode) {
-        if (lightRaw > 3000) autoLightState = true;
-        else if (lightRaw < 1500) autoLightState = false;
-        digitalWrite(LED_AUTO_PIN, autoLightState ? HIGH : LOW);
+      rainState = newRainState;
+      if (rainState == LOW) rainCoverOpen();
+      else rainCoverClose();
     }
     
-    // Gas Alarm
+    // Auto Light Control for LED_AUTO_PIN (GPIO 2)
+    // Logic INVERTED: High analog > 3000 = Dark -> ON, Low < 1500 = Bright -> OFF
+    if (isAutoMode) {
+      if (lightRaw > 3000) {
+        autoLightState = true;
+      } else if (lightRaw < 1500) {
+        autoLightState = false;
+      }
+      digitalWrite(LED_AUTO_PIN, autoLightState ? HIGH : LOW);
+    } else {
+      // Manual Mode: autoLightState is set via API
+      digitalWrite(LED_AUTO_PIN, autoLightState ? HIGH : LOW);
+    }
+  }
+
+  // ===== Factory Reset Check (Hold BOOT > 5s) =====
+  static unsigned long bootPressStart = 0;
+  if (digitalRead(BOOT_PIN) == LOW) {
+    if (bootPressStart == 0) bootPressStart = millis();
+    if (millis() - bootPressStart > 5000) {
+      // Factory Reset
+      Serial.println("⚠️ Factory Reset Initiated!");
+      display.clearDisplay();
+      display.setCursor(10, 20);
+      display.println("RESETTING...");
+      display.display();
+      beep(false); // Long beep
+      
+      WiFiManager wm;
+      wm.resetSettings();
+      
+      preferences.begin("smarthome", false);
+      preferences.clear();
+      preferences.end();
+      
+      delay(1000);
+      ESP.restart();
+    }
+  } else {
+    bootPressStart = 0;
+  }
+    // Gas Alarm Logic
     if (gasRaw > GAS_THRESHOLD) {
       static unsigned long lastGasBeep = 0;
-      if (now - lastGasBeep > 500) {
+      if (now - lastGasBeep > 500) { // Beep every 0.5 second
         lastGasBeep = now;
-        beep(false);
+        Serial.printf("⚠️ GAS ALERT! Level: %d\n", gasRaw);
+        beep(false); // Alert beep (300ms)
       }
     }
   }
 
-  // Touch & Switches
-  // SW1: TOUCH_PIN (GPIO 25) -> Controls LED3 (Swap logic retained from before)
-  // SW1: TOUCH_PIN (GPIO 25) -> Controls LED3 (Swap logic retained from before)
-  static bool lastTouchVal = LOW;
-  static unsigned long touchStart = 0;
-  bool touchNow = digitalRead(TOUCH_PIN) == HIGH; 
+  // handle switches for LED toggles
   
-  if (touchNow) {
-    if (!lastTouchVal) touchStart = now; // Rising edge
-    if (now - touchStart > 5000) { // Held for 5 seconds
-       Serial.println("⚠️ Factory Reset Triggered!");
-       beep(false); delay(200); beep(false); delay(200); beep(false);
-       display.clearDisplay();
-       display.setCursor(10,20); display.println("RESETTING..."); display.display();
-       
-       WiFiManager wm;
-       wm.resetSettings();
-       delay(1000);
-       ESP.restart();
-    }
+  // SW1: TOUCH_PIN (GPIO 25) -> Now controls LED3 (Swap)
+  bool touchNow = digitalRead(TOUCH_PIN) == HIGH;
+  if (touchNow && !lastTouch && (now - lastButtonPress > 200)) {
+    led3State = !led3State;
+    digitalWrite(LED3_PIN, led3State ? HIGH : LOW);
+    Serial.printf("💡 LED3 toggled via Touch(25): %s\n", led3State ? "ON" : "OFF");
+    lastButtonPress = now;
   }
+  lastTouch = touchNow;
 
-  if (!touchNow && lastTouchVal) { // Falling edge (Released)
-     if (now - touchStart < 1000) { // Short press (< 1s)
-         led3State = !led3State;
-         digitalWrite(LED3_PIN, led3State ? HIGH : LOW);
-         // delay(150); // Removed delay to improve responsiveness
-     }
-  }
-  lastTouchVal = touchNow;
-
-  // SW2: SWITCH2_PIN (GPIO 33) -> Controls LED2
+  // SW2: SWITCH2_PIN (GPIO 33) -> Now controls LED2 (GPIO 26)
   static bool lastSw2 = HIGH;
   bool sw2Now = digitalRead(SWITCH2_PIN); 
-  if (sw2Now == LOW && lastSw2 == HIGH) { // Falling edge
+  if (sw2Now == LOW && lastSw2 == HIGH && (now - lastButtonPress > 200)) { // Falling edge
     led2State = !led2State;
     digitalWrite(LED2_PIN, led2State ? HIGH : LOW);
-    delay(150);
+    Serial.printf("💡 LED2 toggled via Switch(33): %s\n", led2State ? "ON" : "OFF");
+    lastButtonPress = now;
   }
   lastSw2 = sw2Now;
-  
-   // SW3 (GPIO 39) -> Controls LED1
+
+  // SW3: SWITCH3_PIN (VN/GPIO 39) -> Controls LED1 (GPIO 32)
   static bool lastSw3 = LOW;
-  bool sw3Now = digitalRead(SWITCH3_PIN) == HIGH;
-  if (sw3Now && !lastSw3) {
+  bool sw3Now = digitalRead(SWITCH3_PIN) == HIGH; // TTP223 Active HIGH
+  if (sw3Now && !lastSw3 && (now - lastButtonPress > 200)) { // Rising edge
     led1State = !led1State;
     digitalWrite(LED1_PIN, led1State ? HIGH : LOW);
-    delay(150);
+    Serial.printf("💡 LED1 toggled via Switch(VN/39): %s\n", led1State ? "ON" : "OFF");
+    lastButtonPress = now;
   }
   lastSw3 = sw3Now;
 
-  // RFID Logic (Restored!)
-  if (now - lastReadMillis > repeatDelay) {
-    if (mfrc.PICC_IsNewCardPresent() && mfrc.PICC_ReadCardSerial()) {
-      String uid = uidToString(mfrc.uid);
-      bool authorized = isWhitelisted(uid);
-      
-      showUidScreen(uid, authorized);
-      
-      if (authorized) {
-        beep(true);
-        servoTransition(SERVO_OPENING);
-        sendAccessLog(uid, true);
-      } else {
-        beep(false);
-        sendAccessLog(uid, false);
-      }
-      
-      lastReadMillis = now;
-      mfrc.PICC_HaltA();
-      mfrc.PCD_StopCrypto1();
+  // Update display (cycling logic) - Handle Result Screen priority
+  if (showingResult) {
+    if (now - resultStartMillis > RESULT_DISPLAY_DURATION) {
+      showingResult = false;
+      showMainScreen(); // Return to standard screens
+    }
+  } else {
+    if (now - lastSensorDisplayMillis >= SENSOR_DISPLAY_INTERVAL) {
+      lastSensorDisplayMillis = now;
+      showMainScreen();
     }
   }
 
-  // Display Update
-  if (now - lastSensorDisplayMillis >= SENSOR_DISPLAY_INTERVAL) {
-    lastSensorDisplayMillis = now;
-    showMainScreen();
-  }
-  
-  // Servo Handling
+
+  // Servo state machine: OPENING -> OPEN -> auto-close only after SERVO_OPEN_MS from last valid access
   if (servoState == SERVO_OPENING) {
-      servoState = SERVO_OPEN; 
-      servoStateMillis = now;
+    // opening, immediately enter OPEN and set timer
+    servoState = SERVO_OPEN;
+    servoStateMillis = now;
   } else if (servoState == SERVO_OPEN) {
-      if (now - servoStateMillis > SERVO_OPEN_MS) {
-          servoTransition(SERVO_CLOSING);
-      }
+    // if time since last scan (servoStateMillis updated on each valid scan) exceeds open ms -> close
+    if (now - servoStateMillis >= SERVO_OPEN_MS) {
+      servoTransition(SERVO_CLOSING);
+      // Log auto-close event
+      sendAccessLog("DOOR_AUTO_CLOSE", true);
+      // set closing start time to now to measure motion
+      servoStateMillis = now;
+    }
   } else if (servoState == SERVO_CLOSING) {
-       servoState = SERVO_CLOSED;
-       servoTransition(SERVO_CLOSED);
+    // after physical move time -> CLOSED
+    if (now - servoStateMillis >= 700) {
+      servoTransition(SERVO_CLOSED);
+    }
   }
+
+  // RFID reading: control servo; accepted scans must be >= repeatDelay apart
+  if (mfrc.PICC_IsNewCardPresent() && mfrc.PICC_ReadCardSerial()) {
+    // always consume card, but only accept if enough time passed from last accepted read
+    unsigned long between = now - lastReadMillis;
+    String uidStr = uidToString(mfrc.uid);
+    bool ok = isWhitelisted(uidStr);
+
+
+    if (between >= repeatDelay && ok) {
+      // accepted valid access
+      lastReadMillis = now;
+      Serial.printf("Card UID: %s -> ALLOWED\n", uidStr.c_str());
+      showUidScreen(uidStr, true);
+      beep(true);
+      sendAccessLog(uidStr, true); // Log to backend
+
+      // If already open or opening, reset timer to extend open period
+      if (servoState == SERVO_OPEN || servoState == SERVO_OPENING) {
+        // reset timer to extend
+        servoStateMillis = now;
+      } else {
+        // not open: attach & open
+        if (!servoRight.attached()) servoRight.attach(SERVO_RIGHT_PIN);
+        if (!servoLeft.attached()) servoLeft.attach(SERVO_LEFT_PIN);
+        delay(40); // allow servo to attach/stabilize
+        servoTransition(SERVO_OPENING);
+        // Log door open after RFID access
+        sendAccessLog("DOOR_OPEN (RFID)", true);
+      }
+    } else {
+      // either denied or too-frequent
+      if (!ok) {
+        Serial.printf("Card UID: %s -> DENIED\n", uidStr.c_str());
+        showUidScreen(uidStr, false);
+        beep(false);
+        sendAccessLog(uidStr, false); // Log denied access
+      } else {
+        // too-frequent attempt — ignore but can show briefly
+        Serial.printf("Card UID: %s -> IGNORED (repeat too fast)\n", uidStr.c_str());
+      }
+    }
+
+    // Important cleanup for MFRC522
+    mfrc.PICC_HaltA();
+    mfrc.PCD_StopCrypto1();
+    delay(30); // tiny non-blocking pause
+  }
+
+  delay(10); // keep loop responsive
 }
