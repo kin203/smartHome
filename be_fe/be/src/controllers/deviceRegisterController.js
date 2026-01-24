@@ -36,25 +36,20 @@ const registerDevice = async (req, res) => {
             return res.json({ device, message: 'Device linked to MAC' });
         }
 
-        // Create new device (assign to first user for now)
-        const User = require('../models/userModel');
-        const firstUser = await User.findOne();
-
-        if (!firstUser) {
-            return res.status(500).json({ message: 'No users found. Please create a user first.' });
-        }
-
+        // Create new device as UNCLAIMED (user: null)
+        // Users can claim this device later via /api/devices/claim-by-mac
         device = await Device.create({
-            user: firstUser._id,
+            user: null, // Unclaimed - waiting for user to claim
             name: name || `ESP32-${mac.substring(mac.length - 8)}`,
-            type: 'Other',
+            type: 'Hub',
             ip,
             mac,
-            status: 'online'
+            status: 'online',
+            firmwareVersion: req.body.firmwareVersion
         });
 
-        console.log(`New device registered: ${mac}`);
-        res.status(201).json({ device, message: 'Device registered' });
+        console.log(`New unclaimed device registered: ${mac}`);
+        res.status(201).json({ device, message: 'Device registered as unclaimed' });
     } catch (error) {
         console.error('Register device error:', error);
         res.status(500).json({ message: 'Failed to register device' });

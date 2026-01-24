@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react';
 import axios from '../api/axios';
 
 const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
-    // Steps: 'scan' | 'results' | 'manual' | 'config'
+    // Steps: 'scan' | 'results' | 'manual' | 'config' | 'claim-mac'
     const [step, setStep] = useState('scan');
     const [foundDevices, setFoundDevices] = useState([]);
     const [manualIP, setManualIP] = useState('');
+    const [macInput, setMacInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
 
     // Config Form State
@@ -25,6 +26,7 @@ const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
             setStep('scan');
             setFoundDevices([]);
             setManualIP('');
+            setMacInput('');
             setFormData({ name: '', type: 'Light', room: 'Phòng Khách', ip: '', mac: '' });
         }
     }, [isOpen]);
@@ -74,6 +76,27 @@ const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
         setStep('config');
     };
 
+    const handleClaimByMAC = async () => {
+        if (!macInput) {
+            alert('Please enter a MAC address');
+            return;
+        }
+
+        setIsLoading(true);
+        try {
+            const response = await axios.post('/devices/claim-by-mac', { mac: macInput });
+            alert('Device claimed successfully!');
+            onAdd(response.data.device);
+            onClose();
+        } catch (error) {
+            console.error('Claim by MAC failed:', error);
+            const message = error.response?.data?.message || 'Failed to claim device';
+            alert(message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
     const handleSave = async (e) => {
         e.preventDefault();
         setIsLoading(true);
@@ -118,7 +141,8 @@ const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
                         {step === 'scan' ? 'Scanning Network...' :
                             step === 'results' ? 'Found Devices' :
                                 step === 'manual' ? 'Add by IP' :
-                                    'Configure Device'}
+                                    step === 'claim-mac' ? 'Claim by MAC Address' :
+                                        'Configure Device'}
                     </h2>
                     <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -169,7 +193,13 @@ const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
                                 </div>
                             )}
 
-                            <div className="pt-6 border-t border-gray-100">
+                            <div className="pt-6 border-t border-gray-100 space-y-3">
+                                <button
+                                    onClick={() => setStep('claim-mac')}
+                                    className="w-full py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold rounded-xl shadow-lg shadow-purple-500/30 flex items-center justify-center gap-2 transition-all"
+                                >
+                                    <span>🔑</span> Claim by MAC Address
+                                </button>
                                 <button
                                     onClick={() => setStep('manual')}
                                     className="w-full py-3 border-2 border-dashed border-gray-300 rounded-xl text-gray-500 font-bold hover:border-blue-500 hover:text-blue-500 transition-all flex items-center justify-center gap-2"
@@ -178,7 +208,7 @@ const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
                                 </button>
                                 <button
                                     onClick={startScan}
-                                    className="w-full mt-3 py-3 text-blue-600 font-bold hover:bg-blue-50 rounded-xl transition-colors"
+                                    className="w-full py-3 text-blue-600 font-bold hover:bg-blue-50 rounded-xl transition-colors"
                                 >
                                     ↻ Rescan
                                 </button>
@@ -186,7 +216,53 @@ const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
                         </div>
                     )}
 
-                    {/* STEP 3: MANUAL IP */}
+                    {/* STEP 3: CLAIM BY MAC */}
+                    {step === 'claim-mac' && (
+                        <div className="space-y-6">
+                            <div className="bg-purple-50 border border-purple-100 rounded-xl p-4 mb-4">
+                                <div className="flex items-start gap-3">
+                                    <span className="text-2xl">💡</span>
+                                    <div className="text-sm text-purple-800">
+                                        <p className="font-bold mb-1">How to find MAC address:</p>
+                                        <ul className="list-disc list-inside space-y-1 text-purple-700">
+                                            <li>Check the OLED display on your ESP32</li>
+                                            <li>Look at Serial Monitor during boot</li>
+                                            <li>Format: XX:XX:XX:XX:XX:XX</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-gray-700 text-sm font-bold mb-2">Device MAC Address</label>
+                                <input
+                                    type="text"
+                                    className="w-full px-4 py-3 rounded-lg bg-gray-50 border border-gray-200 focus:border-purple-500 focus:ring-2 focus:ring-purple-200 outline-none font-mono uppercase"
+                                    placeholder="e.g., A1:B2:C3:D4:E5:F6"
+                                    value={macInput}
+                                    onChange={(e) => setMacInput(e.target.value.toUpperCase())}
+                                    autoFocus
+                                />
+                                <p className="text-xs text-gray-400 mt-2">Enter the MAC address of the device you want to claim.</p>
+                            </div>
+                            <div className="flex gap-3">
+                                <button
+                                    onClick={() => setStep('results')}
+                                    className="flex-1 py-3 text-gray-600 font-bold hover:bg-gray-100 rounded-xl"
+                                >
+                                    Back
+                                </button>
+                                <button
+                                    onClick={handleClaimByMAC}
+                                    disabled={!macInput || isLoading}
+                                    className="flex-1 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold rounded-xl shadow-lg shadow-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    {isLoading ? 'Claiming...' : 'Claim Device'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* STEP 4: MANUAL IP */}
                     {step === 'manual' && (
                         <div className="space-y-6">
                             <div>
@@ -219,7 +295,7 @@ const AddDeviceModal = ({ isOpen, onClose, onAdd }) => {
                         </div>
                     )}
 
-                    {/* STEP 4: CONFIGURATION */}
+                    {/* STEP 5: CONFIGURATION */}
                     {step === 'config' && (
                         <form onSubmit={handleSave} className="space-y-5">
                             <div className="bg-green-50 text-green-700 p-4 rounded-xl text-sm flex items-center gap-2 mb-4">

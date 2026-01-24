@@ -15,6 +15,7 @@ app.use(express.urlencoded({ extended: false }));
 
 app.use('/api/users', require('./routes/authRoutes'));
 app.use('/api/devices', require('./routes/deviceRoutes'));
+app.use('/api/devices', require('./routes/claimRoutes')); // Claim device routes
 app.use('/api/access-logs', require('./routes/accessLogRoutes'));
 app.use('/api/rfid-cards', require('./routes/rfidCardRoutes'));
 

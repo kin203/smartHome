@@ -171,7 +171,7 @@ unsigned long servoStateMillis = 0;
 float lastTemp = NAN;
 float lastHum = NAN;
 int gasRaw = 0;
-const int GAS_THRESHOLD = 800; // Threshold for gas alarm
+const int GAS_THRESHOLD = 1000; // Threshold for gas alarm
 int rainState = HIGH;
 
 // Backend connection status
@@ -393,7 +393,7 @@ void drawScreen1() {
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   if (WiFi.status() == WL_CONNECTED) {
-    display.printf("WiFi: %s", ssid);
+    display.printf("WiFi: %s", WiFi.SSID().c_str());
     display.setCursor(0, 10);
     display.printf("IP: %s", WiFi.localIP().toString().c_str());
   } else {
@@ -802,6 +802,22 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     drawProgress(50, "WiFi OK");
     Serial.println("✅ WiFi connected! " + WiFi.localIP().toString());
+    
+    // Force NTP time sync immediately after WiFi connect
+    drawProgress(60, "Syncing time...");
+    Serial.println("🕐 Syncing time with NTP...");
+    timeClient.begin();
+    int retries = 0;
+    while (!timeClient.update() && retries < 10) {
+      timeClient.forceUpdate();
+      delay(500);
+      retries++;
+    }
+    if (retries < 10) {
+      Serial.println("✅ Time synced: " + timeClient.getFormattedTime());
+    } else {
+      Serial.println("⚠️ Time sync failed, will retry in background");
+    }
   } else {
     drawProgress(50, "WiFi FAIL");
   }
@@ -899,7 +915,7 @@ void loop() {
 
   // update NTP (non-blocking with interval check)
   static unsigned long lastNtpUpdate = 0;
-  if (now - lastNtpUpdate >= 60000) { // Update every 60 seconds
+  if (now - lastNtpUpdate >= 300000) { // Update every 5 minutes (reduced from 60s)
     timeClient.update();
     lastNtpUpdate = now;
   }
