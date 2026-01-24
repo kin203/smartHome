@@ -141,7 +141,7 @@ const DeviceDetailModal = ({ device, isOpen, onClose }) => {
                                                 },
                                                 { label: 'Humidity', value: `${status.humidity}%`, icon: '💧', color: 'text-blue-600' },
                                                 { label: 'Gas Level', value: status.gas, icon: status.gas > 800 ? '⚠️' : '✅', color: status.gas > 800 ? 'text-red-600' : 'text-green-600' },
-                                                { label: 'Rain', value: status.rain === 'detected' ? 'Yes' : 'No', icon: status.rain === 'detected' ? '🌧️' : '☀️', color: 'text-gray-700' },
+                                                { label: 'Rain', value: status.rain === 'Rain' ? 'Yes' : 'No', icon: status.rain === 'Rain' ? '🌧️' : '☀️', color: 'text-gray-700' },
                                             ].map((item, idx) => (
                                                 <div key={idx} className="bg-white/80 backdrop-blur rounded-xl p-4 text-center border border-white shadow-sm hover:shadow-md transition-shadow">
                                                     <div className="text-3xl mb-2 filter drop-shadow-sm">{item.icon}</div>
