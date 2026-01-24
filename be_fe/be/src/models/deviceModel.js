@@ -4,7 +4,8 @@ const deviceSchema = mongoose.Schema(
     {
         user: {
             type: mongoose.Schema.Types.ObjectId,
-            required: true,
+            required: false, // Allow null for unclaimed devices
+            default: null,
             ref: 'User',
         },
         name: {
