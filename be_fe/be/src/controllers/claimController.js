@@ -80,8 +80,37 @@ const claimDeviceByMAC = async (req, res) => {
     }
 };
 
+// @desc    Release device (set user to null)
+// @route   POST /api/devices/release/:deviceId
+// @access  Private
+const releaseDevice = async (req, res) => {
+    try {
+        const device = await Device.findById(req.params.deviceId);
+
+        if (!device) {
+            return res.status(404).json({ message: 'Device not found' });
+        }
+
+        // Check if user owns this device
+        if (!device.user || device.user.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'You do not own this device' });
+        }
+
+        // Release device (set user to null)
+        device.user = null;
+        await device.save();
+
+        console.log(`Device ${device.mac} released by user ${req.user.id}`);
+        res.json({ message: 'Device released successfully. Other users can now claim it.' });
+    } catch (error) {
+        console.error('Release device error:', error);
+        res.status(500).json({ message: 'Failed to release device' });
+    }
+};
+
 module.exports = {
     getUnclaimedDevices,
     claimDevice,
-    claimDeviceByMAC
+    claimDeviceByMAC,
+    releaseDevice
 };
