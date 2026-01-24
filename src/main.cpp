@@ -409,10 +409,10 @@ void drawScreen1() {
   display.setCursor((SCREEN_WIDTH - w) / 2, 25);
   display.print(timeStr);
 
-  // Footer: WiFi Status (weather removed)
+  // Footer: MAC Address (full)
   display.setTextSize(1);
   display.setCursor(0, 50);
-  display.printf("WiFi: %s", WiFi.status() == WL_CONNECTED ? "OK" : "ERR");
+  display.printf("MAC:%s", deviceMac.c_str());
   
   // Page indicator (1/2)
   display.drawRect(SCREEN_WIDTH-10, SCREEN_HEIGHT-2, 4, 2, SSD1306_WHITE); // dot 1 active
