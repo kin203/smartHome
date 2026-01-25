@@ -171,7 +171,7 @@ unsigned long servoStateMillis = 0;
 float lastTemp = NAN;
 float lastHum = NAN;
 int gasRaw = 0;
-const int GAS_THRESHOLD = 1000; // Threshold for gas alarm
+const int GAS_THRESHOLD = 800; // Threshold for gas alarm
 int rainState = HIGH;
 
 // Backend connection status
